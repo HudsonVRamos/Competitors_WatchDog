@@ -1,0 +1,750 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Price Watchdog - Sistema de monitoramento automatizado de preços de concorrentes.
+  Infraestrutura completa: ECS Fargate, SQS, Aurora PostgreSQL Serverless v2, S3, CloudWatch.
+
+# =============================================================================
+# Parameters
+# =============================================================================
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues:
+      - production
+      - staging
+    Description: Ambiente de deploy
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: ID da VPC existente
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: IDs das subnets privadas (mínimo 2 AZs para Aurora)
+
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: IDs das subnets públicas (para NAT/internet access dos workers)
+
+  DBMasterUsername:
+    Type: String
+    Default: price_watchdog
+    Description: Usuário master do banco de dados Aurora
+
+  DBMasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: Senha master do banco de dados Aurora
+
+  CoordinatorImageUri:
+    Type: String
+    Description: URI da imagem Docker do Coordinator (ECR)
+
+  WorkerImageUri:
+    Type: String
+    Description: URI da imagem Docker do Worker (ECR)
+
+  SESFromEmail:
+    Type: String
+    Description: Email remetente verificado no SES
+
+  AlertRecipients:
+    Type: String
+    Default: "pricing-team@company.com"
+    Description: Emails destinatários de alertas (separados por vírgula)
+
+  MonitoringIntervalHours:
+    Type: Number
+    Default: 12
+    Description: Intervalo entre ciclos de monitoramento (horas)
+
+  AlarmSNSTopicArn:
+    Type: String
+    Default: ""
+    Description: ARN do tópico SNS para alarmes (opcional)
+
+Conditions:
+  HasAlarmTopic: !Not [!Equals [!Ref AlarmSNSTopicArn, ""]]
+
+# =============================================================================
+# Resources
+# =============================================================================
+Resources:
+
+  # ===========================================================================
+  # Security Groups
+  # ===========================================================================
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group para ECS tasks do Price Watchdog
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: Permite todo tráfego de saída (internet para scraping)
+      Tags:
+        - Key: Name
+          Value: !Sub "price-watchdog-ecs-sg-${Environment}"
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  AuroraSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group para Aurora PostgreSQL do Price Watchdog
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+          Description: Acesso PostgreSQL a partir dos ECS tasks
+      Tags:
+        - Key: Name
+          Value: !Sub "price-watchdog-aurora-sg-${Environment}"
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===========================================================================
+  # SQS - Fila Principal + DLQ
+  # ===========================================================================
+  PriceWatchdogDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "price-watchdog-tasks-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600  # 14 dias
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  PriceWatchdogQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "price-watchdog-tasks-${Environment}"
+      VisibilityTimeout: 120
+      MessageRetentionPeriod: 86400  # 1 dia
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt PriceWatchdogDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===========================================================================
+  # S3 - Screenshots com lifecycle de 30 dias
+  # ===========================================================================
+  ScreenshotsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "price-watchdog-screenshots-${AWS::AccountId}-${Environment}"
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteAfter30Days
+            Status: Enabled
+            ExpirationInDays: 30
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===========================================================================
+  # Aurora PostgreSQL Serverless v2
+  # ===========================================================================
+  AuroraDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group para Aurora PostgreSQL do Price Watchdog
+      SubnetIds: !Ref SubnetIds
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  AuroraDBCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DBClusterIdentifier: !Sub "price-watchdog-${Environment}"
+      Engine: aurora-postgresql
+      EngineVersion: "15.4"
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterPassword
+      DatabaseName: price_watchdog
+      DBSubnetGroupName: !Ref AuroraDBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref AuroraSecurityGroup
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 0.5
+        MaxCapacity: 4
+      BackupRetentionPeriod: 7
+      StorageEncrypted: true
+      DeletionProtection: true
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  AuroraDBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub "price-watchdog-instance-1-${Environment}"
+      DBClusterIdentifier: !Ref AuroraDBCluster
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===========================================================================
+  # CloudWatch Log Groups
+  # ===========================================================================
+  CoordinatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/price-watchdog-coordinator-${Environment}"
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/price-watchdog-worker-${Environment}"
+      RetentionInDays: 30
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===========================================================================
+  # IAM Roles
+  # ===========================================================================
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "price-watchdog-ecs-execution-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ECRAndLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt CoordinatorLogGroup.Arn
+                  - !GetAtt WorkerLogGroup.Arn
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  CoordinatorTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "price-watchdog-coordinator-task-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CoordinatorPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SQSPublish
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:SendMessageBatch
+                  - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
+                Resource:
+                  - !GetAtt PriceWatchdogQueue.Arn
+              - Sid: SESEmail
+                Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: "*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt CoordinatorLogGroup.Arn
+              - Sid: S3Read
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ScreenshotsBucket.Arn
+                  - !Sub "${ScreenshotsBucket.Arn}/*"
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  WorkerTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "price-watchdog-worker-task-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WorkerPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SQSConsume
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:ChangeMessageVisibility
+                  - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
+                Resource:
+                  - !GetAtt PriceWatchdogQueue.Arn
+              - Sid: S3Upload
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource:
+                  - !Sub "${ScreenshotsBucket.Arn}/*"
+              - Sid: SESEmail
+                Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: "*"
+              - Sid: BedrockInvoke
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: "*"
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt WorkerLogGroup.Arn
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===========================================================================
+  # ECS Cluster
+  # ===========================================================================
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "price-watchdog-${Environment}"
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===========================================================================
+  # ECS Task Definitions
+  # ===========================================================================
+  CoordinatorTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "price-watchdog-coordinator-${Environment}"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: "1024"    # 1 vCPU
+      Memory: "2048"  # 2 GB RAM
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt CoordinatorTaskRole.Arn
+      ContainerDefinitions:
+        - Name: coordinator
+          Image: !Ref CoordinatorImageUri
+          Essential: true
+          Environment:
+            - Name: ENVIRONMENT
+              Value: !Ref Environment
+            - Name: DB_HOST
+              Value: !GetAtt AuroraDBCluster.Endpoint.Address
+            - Name: DB_PORT
+              Value: !GetAtt AuroraDBCluster.Endpoint.Port
+            - Name: DB_NAME
+              Value: price_watchdog
+            - Name: DB_USER
+              Value: !Ref DBMasterUsername
+            - Name: SQS_QUEUE_URL
+              Value: !Ref PriceWatchdogQueue
+            - Name: S3_BUCKET
+              Value: !Ref ScreenshotsBucket
+            - Name: SES_FROM_EMAIL
+              Value: !Ref SESFromEmail
+            - Name: ALERT_RECIPIENTS
+              Value: !Ref AlertRecipients
+            - Name: MONITORING_INTERVAL_HOURS
+              Value: !Ref MonitoringIntervalHours
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+          Secrets:
+            - Name: DB_PASSWORD
+              ValueFrom: !Ref DBPasswordSecret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CoordinatorLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: coordinator
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "price-watchdog-worker-${Environment}"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: "2048"    # 2 vCPU
+      Memory: "4096"  # 4 GB RAM (necessário para Chromium headless)
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt WorkerTaskRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Ref WorkerImageUri
+          Essential: true
+          Environment:
+            - Name: ENVIRONMENT
+              Value: !Ref Environment
+            - Name: DB_HOST
+              Value: !GetAtt AuroraDBCluster.Endpoint.Address
+            - Name: DB_PORT
+              Value: !GetAtt AuroraDBCluster.Endpoint.Port
+            - Name: DB_NAME
+              Value: price_watchdog
+            - Name: DB_USER
+              Value: !Ref DBMasterUsername
+            - Name: SQS_QUEUE_URL
+              Value: !Ref PriceWatchdogQueue
+            - Name: S3_BUCKET
+              Value: !Ref ScreenshotsBucket
+            - Name: SES_FROM_EMAIL
+              Value: !Ref SESFromEmail
+            - Name: ALERT_RECIPIENTS
+              Value: !Ref AlertRecipients
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+          Secrets:
+            - Name: DB_PASSWORD
+              ValueFrom: !Ref DBPasswordSecret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkerLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===========================================================================
+  # Secrets Manager - Senha do banco
+  # ===========================================================================
+  DBPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "price-watchdog/db-password-${Environment}"
+      Description: Senha do banco Aurora PostgreSQL para o Price Watchdog
+      SecretString: !Ref DBMasterPassword
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===========================================================================
+  # ECS Services
+  # ===========================================================================
+  CoordinatorService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AuroraDBInstance
+    Properties:
+      ServiceName: !Sub "price-watchdog-coordinator-${Environment}"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref CoordinatorTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          Subnets: !Ref SubnetIds
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  WorkerService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AuroraDBInstance
+    Properties:
+      ServiceName: !Sub "price-watchdog-worker-${Environment}"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref WorkerTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          Subnets: !Ref SubnetIds
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ===========================================================================
+  # Auto Scaling - Worker Service (1-5 tasks baseado em mensagens na fila)
+  # ===========================================================================
+  WorkerScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 5
+      MinCapacity: 1
+      ResourceId: !Sub "service/${ECSCluster}/${WorkerService.Name}"
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  WorkerScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "price-watchdog-worker-sqs-scaling-${Environment}"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref WorkerScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 5
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+        CustomizedMetricSpecification:
+          MetricName: ApproximateNumberOfMessagesVisible
+          Namespace: AWS/SQS
+          Dimensions:
+            - Name: QueueName
+              Value: !GetAtt PriceWatchdogQueue.QueueName
+          Statistic: Average
+
+  # ===========================================================================
+  # CloudWatch Alarms
+  # ===========================================================================
+  DLQMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "price-watchdog-dlq-messages-${Environment}"
+      AlarmDescription: >
+        Alarme disparado quando há mensagens na DLQ do Price Watchdog.
+        Indica que tarefas de extração falharam 3 vezes consecutivas.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt PriceWatchdogDLQ.QueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        !If
+          - HasAlarmTopic
+          - - !Ref AlarmSNSTopicArn
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+  HighQueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "price-watchdog-high-queue-depth-${Environment}"
+      AlarmDescription: >
+        Alarme disparado quando a fila principal acumula muitas mensagens,
+        indicando que workers podem estar sobrecarregados.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt PriceWatchdogQueue.QueueName
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 50
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      ActionsEnabled: true
+      AlarmActions:
+        !If
+          - HasAlarmTopic
+          - - !Ref AlarmSNSTopicArn
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: price-watchdog
+        - Key: Environment
+          Value: !Ref Environment
+
+# =============================================================================
+# Outputs
+# =============================================================================
+Outputs:
+  ECSClusterName:
+    Description: Nome do cluster ECS
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterName"
+
+  ECSClusterArn:
+    Description: ARN do cluster ECS
+    Value: !GetAtt ECSCluster.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterArn"
+
+  SQSQueueUrl:
+    Description: URL da fila SQS principal
+    Value: !Ref PriceWatchdogQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-QueueUrl"
+
+  SQSQueueArn:
+    Description: ARN da fila SQS principal
+    Value: !GetAtt PriceWatchdogQueue.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-QueueArn"
+
+  DLQUrl:
+    Description: URL da Dead Letter Queue
+    Value: !Ref PriceWatchdogDLQ
+    Export:
+      Name: !Sub "${AWS::StackName}-DLQUrl"
+
+  AuroraEndpoint:
+    Description: Endpoint do cluster Aurora PostgreSQL
+    Value: !GetAtt AuroraDBCluster.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-AuroraEndpoint"
+
+  AuroraPort:
+    Description: Porta do cluster Aurora PostgreSQL
+    Value: !GetAtt AuroraDBCluster.Endpoint.Port
+    Export:
+      Name: !Sub "${AWS::StackName}-AuroraPort"
+
+  S3BucketName:
+    Description: Nome do bucket S3 de screenshots
+    Value: !Ref ScreenshotsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-S3Bucket"
+
+  CoordinatorServiceName:
+    Description: Nome do serviço ECS do Coordinator
+    Value: !GetAtt CoordinatorService.Name
+    Export:
+      Name: !Sub "${AWS::StackName}-CoordinatorService"
+
+  WorkerServiceName:
+    Description: Nome do serviço ECS do Worker
+    Value: !GetAtt WorkerService.Name
+    Export:
+      Name: !Sub "${AWS::StackName}-WorkerService"
+
+  DatabaseConnectionString:
+    Description: String de conexão PostgreSQL (sem senha)
+    Value: !Sub "postgresql+asyncpg://${DBMasterUsername}@${AuroraDBCluster.Endpoint.Address}:${AuroraDBCluster.Endpoint.Port}/price_watchdog"
+    Export:
+      Name: !Sub "${AWS::StackName}-DBConnectionString"

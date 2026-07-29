@@ -1,0 +1,42 @@
+# Dockerfile.worker
+# Imagem para o serviço worker (scraping com Playwright + Chromium headless)
+
+FROM python:3.11-slim AS base
+
+# Variáveis de ambiente para otimização Python
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src
+
+WORKDIR /app
+
+# Instalar dependências de sistema necessárias para Playwright/Chromium
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libpq-dev \
+        wget \
+        gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copiar apenas pyproject.toml primeiro para cache de dependências
+COPY pyproject.toml ./
+
+# Instalar dependências de produção (sem dev)
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir .
+
+# Instalar Playwright e Chromium com todas as dependências do sistema
+RUN playwright install chromium --with-deps
+
+# Copiar código-fonte
+COPY src/ ./src/
+COPY alembic/ ./alembic/
+COPY alembic.ini ./
+
+# Criar usuário não-root para segurança
+RUN groupadd -r appuser && useradd -r -g appuser -d /app appuser && \
+    chown -R appuser:appuser /app
+
+USER appuser
+
+ENTRYPOINT ["python", "-m", "price_watchdog.main_worker"]
