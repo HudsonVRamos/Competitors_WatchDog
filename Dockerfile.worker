@@ -6,7 +6,8 @@ FROM public.ecr.aws/docker/library/python:3.11-slim AS base
 # Variáveis de ambiente para otimização Python
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app/src
+    PYTHONPATH=/app/src \
+    PLAYWRIGHT_BROWSERS_PATH=/app/browsers
 
 WORKDIR /app
 
@@ -36,7 +37,5 @@ COPY alembic.ini ./
 # Criar usuário não-root para segurança
 RUN groupadd -r appuser && useradd -r -g appuser -d /app appuser && \
     chown -R appuser:appuser /app
-
-USER appuser
 
 ENTRYPOINT ["python", "-m", "price_watchdog.main_worker"]
