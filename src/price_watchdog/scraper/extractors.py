@@ -248,7 +248,7 @@ class AIExtractor(BaseExtractor):
 
     # Modelo Claude Sonnet 4.6 no Bedrock (inference profile)
     MODEL_ID = "us.anthropic.claude-sonnet-4-6"
-    MIN_CONFIDENCE = 80.0
+    MIN_CONFIDENCE = 60.0
 
     def __init__(self, region_name: str = "us-east-1") -> None:
         """Inicializa o AIExtractor.
@@ -286,8 +286,8 @@ class AIExtractor(BaseExtractor):
                     failure_reason="Falha ao capturar screenshot da página",
                 )
 
-            # Redimensionar se necessário (max 4000px em qualquer dimensão)
-            screenshot_bytes = self._resize_image_if_needed(screenshot_bytes)
+            # Redimensionar se necessário (max 7000px em qualquer dimensão)
+            screenshot_bytes = self._resize_image_if_needed(screenshot_bytes, max_dimension=7000)
 
             # Chamar Bedrock com retry
             result = await self._invoke_bedrock_with_retry(
