@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from playwright.async_api import async_playwright, Browser, Page
+from playwright.async_api import async_playwright, Page
 
 from price_watchdog.models.dataclasses import PriceCheckMessage, ScrapeResult
 from price_watchdog.scraper.extractors import (
@@ -46,33 +46,13 @@ class PriceScraper:
 
     def __init__(self) -> None:
         """Inicializa o PriceScraper."""
-        self._browser: Browser | None = None
-        self._playwright = None
-
-    async def _ensure_browser(self) -> Browser:
-        """Garante que o browser está inicializado.
-
-        Returns:
-            Instância do Browser Playwright.
-        """
-        if self._browser is None or not self._browser.is_connected():
-            logger.info("Inicializando Playwright + Chromium...")
-            self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--single-process",
-                ],
-            )
-            logger.info("Browser Chromium inicializado.")
-        return self._browser
+        pass
 
     async def scrape(self, message: PriceCheckMessage) -> ScrapeResult:
         """Executa navegação, screenshot e extração de preço.
+
+        Cria um browser novo para cada request para evitar
+        acumular memória entre páginas pesadas.
 
         Args:
             message: Mensagem com dados do produto a ser scrapeado.
@@ -88,10 +68,24 @@ class PriceScraper:
         )
 
         screenshot_bytes: bytes | None = None
+        playwright_instance = None
+        browser: Browser | None = None
         page: Page | None = None
 
         try:
-            browser = await self._ensure_browser()
+            # Criar browser isolado para este request
+            playwright_instance = await async_playwright().start()
+            browser = await playwright_instance.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+            )
+            logger.info("Browser Chromium inicializado.")
+
             context = await browser.new_context(
                 viewport={"width": 1920, "height": 1080},
                 user_agent=(
@@ -126,13 +120,12 @@ class PriceScraper:
             # Aguardar um pouco para conteúdo dinâmico carregar
             await page.wait_for_timeout(3000)
 
-            # 2. Capturar screenshot full-page (max 5000px)
+            # 2. Capturar screenshot (viewport apenas, não full-page para economizar memória)
             try:
                 screenshot_bytes = await page.screenshot(
-                    full_page=True,
+                    full_page=False,
                     type="png",
                 )
-                # Limitar altura se necessário (Playwright já limita internamente)
                 logger.info(
                     "Screenshot capturado: %d bytes",
                     len(screenshot_bytes),
@@ -197,6 +190,16 @@ class PriceScraper:
                     await page.close()
                 except Exception:
                     pass
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            if playwright_instance:
+                try:
+                    await playwright_instance.stop()
+                except Exception:
+                    pass
 
     def _get_extractor(self, strategy: str) -> BaseExtractor:
         """Retorna o extractor adequado para a estratégia.
@@ -223,13 +226,3 @@ class PriceScraper:
             )
 
         return extractors[strategy]
-
-    async def close(self) -> None:
-        """Fecha o browser e libera recursos."""
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
-        logger.info("Browser fechado.")
