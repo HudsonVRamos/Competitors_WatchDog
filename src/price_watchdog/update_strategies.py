@@ -24,66 +24,33 @@ logger = logging.getLogger(__name__)
 async def main() -> None:
     """Atualiza estratégias de extração no banco."""
     from price_watchdog.database import get_session
-    from price_watchdog.models.entities import Competitor, ProductConfig
+    from price_watchdog.models.entities import ProductConfig
 
     logger.info("Atualizando estratégias de extração...")
 
     async with get_session() as session:
-        # Buscar Claro TV+
-        stmt = select(Competitor).where(Competitor.name == "Claro TV+")
-        result = await session.execute(stmt)
-        claro = result.scalar_one_or_none()
+        # Buscar TODOS os ProductConfigs e mudar para AI
+        all_configs_stmt = select(ProductConfig)
+        all_configs_result = await session.execute(all_configs_stmt)
+        all_configs = list(all_configs_result.scalars().all())
 
-        if claro:
-            configs_stmt = select(ProductConfig).where(
-                ProductConfig.competitor_id == claro.id
+        for config in all_configs:
+            config.extraction_strategy = "ai"
+            config.selector_or_pattern = (
+                f"Encontre o preço mensal do produto '{config.product_name}' "
+                "na página. O preço está em formato brasileiro "
+                "(R$ XX,XX ou R$XX,XX/mês). Retorne o primeiro preço "
+                "que corresponda ao produto solicitado."
             )
-            configs_result = await session.execute(configs_stmt)
-            configs = list(configs_result.scalars().all())
-
-            for config in configs:
-                config.extraction_strategy = "regex"
-                # Regex mais flexível: aceita R$ com ou sem espaço, 
-                # com &nbsp; ou espaço normal, preços de 2-3 dígitos
-                config.selector_or_pattern = (
-                    r"R\$\s*(\d[\d.]*,\d{2})"
-                )
-                logger.info(
-                    "  Atualizado: %s -> regex (flexível)", config.product_name
-                )
-
-            logger.info("Claro TV+ atualizada.")
-        else:
-            logger.warning("Claro TV+ não encontrada no banco.")
-
-        # Buscar HBO Max Brasil
-        stmt = select(Competitor).where(Competitor.name == "HBO Max Brasil")
-        result = await session.execute(stmt)
-        hbo = result.scalar_one_or_none()
-
-        if hbo:
-            configs_stmt = select(ProductConfig).where(
-                ProductConfig.competitor_id == hbo.id
+            logger.info(
+                "  Atualizado: %s -> ai (Claude 4.6)",
+                config.product_name,
             )
-            configs_result = await session.execute(configs_stmt)
-            configs = list(configs_result.scalars().all())
 
-            for config in configs:
-                config.extraction_strategy = "ai"
-                # AI: prompt descritivo para o Bedrock analisar screenshot
-                config.selector_or_pattern = (
-                    "Encontre o preço mensal do plano de assinatura "
-                    "na página. Os preços estão em formato brasileiro "
-                    "(R$ XX,XX/mês) dentro de cards de planos."
-                )
-                logger.info(
-                    "  Atualizado: %s -> ai (Bedrock Claude 4.6)",
-                    config.product_name,
-                )
-
-            logger.info("HBO Max Brasil atualizada para AI (Bedrock).")
-        else:
-            logger.warning("HBO Max Brasil não encontrada no banco.")
+        logger.info(
+            "Todos os %d ProductConfigs atualizados para AI.",
+            len(all_configs),
+        )
 
     logger.info("Atualização concluída.")
 
