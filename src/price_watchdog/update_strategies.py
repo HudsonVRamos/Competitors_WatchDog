@@ -35,7 +35,6 @@ async def main() -> None:
         claro = result.scalar_one_or_none()
 
         if claro:
-            # Atualizar configs da Claro para regex
             configs_stmt = select(ProductConfig).where(
                 ProductConfig.competitor_id == claro.id
             )
@@ -44,6 +43,34 @@ async def main() -> None:
 
             for config in configs:
                 config.extraction_strategy = "regex"
+                # Regex mais flexível: aceita R$ com ou sem espaço, 
+                # com &nbsp; ou espaço normal, preços de 2-3 dígitos
+                config.selector_or_pattern = (
+                    r"R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})"
+                )
+                logger.info(
+                    "  Atualizado: %s -> regex (flexível)", config.product_name
+                )
+
+            logger.info("Claro TV+ atualizada.")
+        else:
+            logger.warning("Claro TV+ não encontrada no banco.")
+
+        # Buscar HBO Max Brasil
+        stmt = select(Competitor).where(Competitor.name == "HBO Max Brasil")
+        result = await session.execute(stmt)
+        hbo = result.scalar_one_or_none()
+
+        if hbo:
+            configs_stmt = select(ProductConfig).where(
+                ProductConfig.competitor_id == hbo.id
+            )
+            configs_result = await session.execute(configs_stmt)
+            configs = list(configs_result.scalars().all())
+
+            for config in configs:
+                config.extraction_strategy = "regex"
+                # HBO Max tem preços no formato R$XX,XX/mês
                 config.selector_or_pattern = (
                     r"R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})"
                 )
@@ -51,9 +78,9 @@ async def main() -> None:
                     "  Atualizado: %s -> regex", config.product_name
                 )
 
-            logger.info("Claro TV+ atualizada para regex.")
+            logger.info("HBO Max Brasil atualizada para regex.")
         else:
-            logger.warning("Claro TV+ não encontrada no banco.")
+            logger.warning("HBO Max Brasil não encontrada no banco.")
 
     logger.info("Atualização concluída.")
 

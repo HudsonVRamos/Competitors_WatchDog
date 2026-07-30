@@ -165,6 +165,20 @@ class RegexExtractor(BaseExtractor):
             match = re.search(pattern, html_content)
 
             if match is None:
+                # Fallback: buscar no texto visível da página
+                # (sites SPA podem ter preços renderizados via JS
+                # que aparecem no texto mas não no HTML source)
+                logger.info(
+                    "Regex não encontrou no HTML, tentando texto visível para '%s'",
+                    product_name,
+                )
+                try:
+                    visible_text = await page.inner_text("body")
+                    match = re.search(pattern, visible_text)
+                except Exception:
+                    pass
+
+            if match is None:
                 logger.warning(
                     "Regex '%s' não encontrou correspondência para produto '%s'",
                     pattern,
