@@ -46,7 +46,7 @@ async def main() -> None:
                 # Regex mais flexível: aceita R$ com ou sem espaço, 
                 # com &nbsp; ou espaço normal, preços de 2-3 dígitos
                 config.selector_or_pattern = (
-                    r"R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})"
+                    r"R\$\s*(\d[\d.]*,\d{2})"
                 )
                 logger.info(
                     "  Atualizado: %s -> regex (flexível)", config.product_name
@@ -70,9 +70,9 @@ async def main() -> None:
 
             for config in configs:
                 config.extraction_strategy = "regex"
-                # HBO Max tem preços no formato R$XX,XX/mês
+                # HBO Max: preços como R$22,90/mês (sem separador de milhar)
                 config.selector_or_pattern = (
-                    r"R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})"
+                    r"R\$\s*(\d[\d.]*,\d{2})"
                 )
                 logger.info(
                     "  Atualizado: %s -> regex", config.product_name
