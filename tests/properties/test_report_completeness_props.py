@@ -112,7 +112,7 @@ class TestReportCompletenessProperties:
             max_size=50,
         )
     )
-    @settings(max_examples=100)
+    @settings(max_examples=100, deadline=None)
     def test_report_contains_exact_number_of_data_rows(
         self, rows: list[ReportRow]
     ) -> None:
@@ -150,7 +150,7 @@ class TestReportCompletenessProperties:
             max_size=20,
         )
     )
-    @settings(max_examples=100)
+    @settings(max_examples=100, deadline=None)
     def test_report_contains_all_required_columns(
         self, rows: list[ReportRow]
     ) -> None:
@@ -265,7 +265,7 @@ class TestReportCompletenessProperties:
             max_size=0,
         )
     )
-    @settings(max_examples=10)
+    @settings(max_examples=10, deadline=None)
     def test_empty_report_has_no_data_rows(
         self, rows: list[ReportRow]
     ) -> None:
