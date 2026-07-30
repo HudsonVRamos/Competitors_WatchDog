@@ -1,0 +1,32 @@
+{
+  "family": "price-watchdog-migration",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::761018874615:role/price-watchdog-task-execution-role",
+  "taskRoleArn": "arn:aws:iam::761018874615:role/price-watchdog-task-role",
+  "containerDefinitions": [
+    {
+      "name": "migration",
+      "image": "761018874615.dkr.ecr.us-east-1.amazonaws.com/price-watchdog:coordinator-latest",
+      "essential": true,
+      "command": ["python", "-c", "import asyncio; from sqlalchemy.ext.asyncio import create_async_engine; from price_watchdog.models.entities import Base; async def run(): engine = create_async_engine('postgresql+asyncpg://watchdog:SkyWatchdog2024!@brand-watchdog-cluster.cluster-c3am2qs06cp6.us-east-1.rds.amazonaws.com:5432/brand_watchdog'); async with engine.begin() as conn: await conn.run_sync(Base.metadata.create_all); await engine.dispose(); print('Tables created!'); asyncio.run(run())"],
+      "environment": [
+        { "name": "DB_URL", "value": "postgresql+asyncpg://watchdog:SkyWatchdog2024!@brand-watchdog-cluster.cluster-c3am2qs06cp6.us-east-1.rds.amazonaws.com:5432/brand_watchdog" },
+        { "name": "SQS_QUEUE_URL", "value": "https://sqs.us-east-1.amazonaws.com/761018874615/price-watchdog-tasks" },
+        { "name": "S3_BUCKET", "value": "price-watchdog-screenshots-761018874615" },
+        { "name": "SES_FROM_EMAIL", "value": "suporteott6@gmail.com" },
+        { "name": "AWS_DEFAULT_REGION", "value": "us-east-1" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/price-watchdog",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "migration"
+        }
+      }
+    }
+  ]
+}

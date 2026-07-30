@@ -79,6 +79,21 @@ async def main() -> None:
         interval_hours=settings.monitoring_interval_hours,
     )
 
+    # Criar tabelas no banco de dados (se não existirem)
+    logger.info("Verificando/criando tabelas no banco de dados...")
+    try:
+        from price_watchdog.database import engine
+        from price_watchdog.models.entities import Base
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Tabelas verificadas/criadas com sucesso.")
+    except Exception:
+        logger.error(
+            "Falha ao criar tabelas no banco de dados.",
+            exc_info=True,
+        )
+
     # Seed de concorrentes iniciais
     logger.info("Executando seed de concorrentes iniciais...")
     try:

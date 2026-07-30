@@ -1,0 +1,5 @@
+{
+  "VisibilityTimeout": "120",
+  "MessageRetentionPeriod": "86400",
+  "RedrivePolicy": "{\"deadLetterTargetArn\":\"arn:aws:sqs:us-east-1:761018874615:price-watchdog-dlq\",\"maxReceiveCount\":\"3\"}"
+}
