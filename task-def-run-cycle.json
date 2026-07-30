@@ -11,8 +11,8 @@
       "name": "run-cycle",
       "image": "761018874615.dkr.ecr.us-east-1.amazonaws.com/price-watchdog:coordinator-latest",
       "essential": true,
-      "entryPoint": ["python", "-c"],
-      "command": ["import asyncio; from price_watchdog.coordinator.coordinator import PriceMonitoringCoordinator; from price_watchdog.queue.publisher import SQSPublisher; from price_watchdog.coordinator.cycle_consolidator import CycleConsolidator; from price_watchdog.storage.price_store import PriceStore; from price_watchdog.reports.excel_report import ExcelReportGenerator; from price_watchdog.alerts.email_notifier import EmailNotifier; from price_watchdog.registry.competitor_manager import CompetitorManager; async def run(): pub=SQSPublisher(); ps=PriceStore(); rg=ExcelReportGenerator(); en=EmailNotifier(); cm=CompetitorManager(); cons=CycleConsolidator(price_store=ps,report_generator=rg,email_notifier=en); coord=PriceMonitoringCoordinator(publisher=pub,consolidator=cons,price_store=ps,competitor_manager=cm); cycle=await coord.run_cycle(); print(f'Cycle created: {cycle.id} status={cycle.status} total={cycle.total_products}'); asyncio.run(run())"],
+      "entryPoint": ["python", "-m", "price_watchdog.run_cycle_once"],
+      "command": [],
       "environment": [
         { "name": "DB_URL", "value": "postgresql+asyncpg://watchdog:SkyWatchdog2024!@brand-watchdog-cluster.cluster-c3am2qs06cp6.us-east-1.rds.amazonaws.com:5432/brand_watchdog" },
         { "name": "SQS_QUEUE_URL", "value": "https://sqs.us-east-1.amazonaws.com/761018874615/price-watchdog-tasks" },

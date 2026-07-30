@@ -27,9 +27,13 @@ class CompetitorManager:
         Returns:
             Lista de ProductConfig com is_active=True.
         """
+        from sqlalchemy.orm import selectinload
+
         async with get_session() as session:
-            stmt = select(ProductConfig).where(
-                ProductConfig.is_active.is_(True)
+            stmt = (
+                select(ProductConfig)
+                .where(ProductConfig.is_active.is_(True))
+                .options(selectinload(ProductConfig.competitor))
             )
             result = await session.execute(stmt)
             configs = list(result.scalars().all())
