@@ -1,7 +1,7 @@
 # Dockerfile.worker
 # Imagem para o serviço worker (scraping com Playwright + Chromium headless)
 
-FROM python:3.11-slim AS base
+FROM public.ecr.aws/docker/library/python:3.11-slim AS base
 
 # Variáveis de ambiente para otimização Python
 ENV PYTHONDONTWRITEBYTECODE=1 \
