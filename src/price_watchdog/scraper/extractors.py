@@ -246,8 +246,8 @@ class AIExtractor(BaseExtractor):
     para falhas de rede ou timeout do Bedrock.
     """
 
-    # Modelo Claude Sonnet no Bedrock
-    MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0"
+    # Modelo Claude Sonnet 4.6 no Bedrock (inference profile)
+    MODEL_ID = "us.anthropic.claude-sonnet-4-6"
     MIN_CONFIDENCE = 80.0
 
     def __init__(self, region_name: str = "us-east-1") -> None:

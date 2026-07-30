@@ -69,16 +69,19 @@ async def main() -> None:
             configs = list(configs_result.scalars().all())
 
             for config in configs:
-                config.extraction_strategy = "regex"
-                # HBO Max: preços como R$22,90/mês (sem separador de milhar)
+                config.extraction_strategy = "ai"
+                # AI: prompt descritivo para o Bedrock analisar screenshot
                 config.selector_or_pattern = (
-                    r"R\$\s*(\d[\d.]*,\d{2})"
+                    "Encontre o preço mensal do plano de assinatura "
+                    "na página. Os preços estão em formato brasileiro "
+                    "(R$ XX,XX/mês) dentro de cards de planos."
                 )
                 logger.info(
-                    "  Atualizado: %s -> regex", config.product_name
+                    "  Atualizado: %s -> ai (Bedrock Claude 4.6)",
+                    config.product_name,
                 )
 
-            logger.info("HBO Max Brasil atualizada para regex.")
+            logger.info("HBO Max Brasil atualizada para AI (Bedrock).")
         else:
             logger.warning("HBO Max Brasil não encontrada no banco.")
 
