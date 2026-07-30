@@ -277,8 +277,8 @@ class AIExtractor(BaseExtractor):
             ExtractionResult com preço e confidence, ou falha com razão.
         """
         try:
-            # Capturar screenshot do viewport (não full-page para evitar imagens enormes)
-            screenshot_bytes = await page.screenshot(full_page=False)
+            # Capturar screenshot full-page para AI (garante que preços abaixo do fold sejam visíveis)
+            screenshot_bytes = await page.screenshot(full_page=True)
 
             if not screenshot_bytes:
                 return ExtractionResult(
