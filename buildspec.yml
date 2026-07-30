@@ -1,0 +1,33 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-east-1
+    AWS_ACCOUNT_ID: "761018874615"
+    ECR_REPO: price-watchdog
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPO
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=${COMMIT_HASH:-latest}
+
+  build:
+    commands:
+      - echo Building coordinator image...
+      - docker build -f Dockerfile.coordinator -t $REPOSITORY_URI:coordinator-latest -t $REPOSITORY_URI:coordinator-$IMAGE_TAG .
+      - echo Building worker image...
+      - docker build -f Dockerfile.worker -t $REPOSITORY_URI:worker-latest -t $REPOSITORY_URI:worker-$IMAGE_TAG .
+
+  post_build:
+    commands:
+      - echo Pushing coordinator image...
+      - docker push $REPOSITORY_URI:coordinator-latest
+      - docker push $REPOSITORY_URI:coordinator-$IMAGE_TAG
+      - echo Pushing worker image...
+      - docker push $REPOSITORY_URI:worker-latest
+      - docker push $REPOSITORY_URI:worker-$IMAGE_TAG
+      - echo Build completed on `date`
