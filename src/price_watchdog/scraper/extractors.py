@@ -263,8 +263,10 @@ class AIExtractor(BaseExtractor):
     ) -> ExtractionResult:
         """Extrai preço usando screenshot + Bedrock AI.
 
-        Captura screenshot da página, envia ao Bedrock com prompt
-        pedindo identificação do preço, e valida a confidence.
+        Captura screenshot da página, redimensiona se necessário
+        (max 4000px em qualquer dimensão para respeitar limites do Bedrock),
+        envia ao Bedrock com prompt pedindo identificação do preço,
+        e valida a confidence.
 
         Args:
             page: Página Playwright já navegada.
@@ -275,14 +277,17 @@ class AIExtractor(BaseExtractor):
             ExtractionResult com preço e confidence, ou falha com razão.
         """
         try:
-            # Capturar screenshot da página
-            screenshot_bytes = await page.screenshot(full_page=True)
+            # Capturar screenshot do viewport (não full-page para evitar imagens enormes)
+            screenshot_bytes = await page.screenshot(full_page=False)
 
             if not screenshot_bytes:
                 return ExtractionResult(
                     success=False,
                     failure_reason="Falha ao capturar screenshot da página",
                 )
+
+            # Redimensionar se necessário (max 4000px em qualquer dimensão)
+            screenshot_bytes = self._resize_image_if_needed(screenshot_bytes)
 
             # Chamar Bedrock com retry
             result = await self._invoke_bedrock_with_retry(
@@ -301,6 +306,53 @@ class AIExtractor(BaseExtractor):
                 success=False,
                 failure_reason=f"Erro na extração AI: {str(e)}",
             )
+
+    def _resize_image_if_needed(
+        self, image_bytes: bytes, max_dimension: int = 4000
+    ) -> bytes:
+        """Redimensiona imagem se exceder max_dimension pixels.
+
+        Args:
+            image_bytes: Bytes da imagem PNG.
+            max_dimension: Dimensão máxima permitida.
+
+        Returns:
+            Bytes da imagem (redimensionada ou original).
+        """
+        try:
+            from io import BytesIO
+            from PIL import Image
+
+            img = Image.open(BytesIO(image_bytes))
+            width, height = img.size
+
+            if width <= max_dimension and height <= max_dimension:
+                return image_bytes
+
+            # Calcular fator de escala
+            scale = min(max_dimension / width, max_dimension / height)
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+
+            img = img.resize((new_width, new_height), Image.LANCZOS)
+
+            buffer = BytesIO()
+            img.save(buffer, format="PNG")
+            logger.info(
+                "Imagem redimensionada de %dx%d para %dx%d",
+                width, height, new_width, new_height,
+            )
+            return buffer.getvalue()
+        except ImportError:
+            logger.warning(
+                "Pillow não disponível, enviando imagem sem redimensionar"
+            )
+            return image_bytes
+        except Exception as e:
+            logger.warning(
+                "Falha ao redimensionar imagem: %s", e
+            )
+            return image_bytes
 
     @retry(
         stop=stop_after_attempt(3),
