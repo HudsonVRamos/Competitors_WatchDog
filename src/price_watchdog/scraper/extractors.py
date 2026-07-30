@@ -248,7 +248,7 @@ class AIExtractor(BaseExtractor):
 
     # Modelo Claude Sonnet 4.6 no Bedrock (inference profile)
     MODEL_ID = "us.anthropic.claude-sonnet-4-6"
-    MIN_CONFIDENCE = 60.0
+    MIN_CONFIDENCE = 30.0
 
     def __init__(self, region_name: str = "us-east-1") -> None:
         """Inicializa o AIExtractor.
