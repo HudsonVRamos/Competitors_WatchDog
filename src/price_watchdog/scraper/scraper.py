@@ -145,12 +145,18 @@ class PriceScraper:
                     failure_reason=f"Erro de navegação: {str(nav_error)}",
                 )
 
+            # Esperar network idle antes do scroll
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass  # Timeout OK
+
             # 3. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
 
             # 4. Voltar ao topo e capturar full_page screenshot
             await page.evaluate("window.scrollTo(0, 0)")
-            await page.wait_for_timeout(5000)  # 5s para garantir renderização completa
+            await page.wait_for_timeout(10000)  # 10s para garantir renderização completa (Vivo TV)
 
             screenshot_bytes = await page.screenshot(
                 full_page=True,
@@ -327,12 +333,18 @@ class PriceScraper:
                     ),
                 )
 
+            # Esperar network idle antes do scroll
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass  # Timeout OK
+
             # 3. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
 
             # 4. Voltar ao topo
             await page.evaluate("window.scrollTo(0, 0)")
-            await page.wait_for_timeout(5000)  # 5s para garantir renderização completa
+            await page.wait_for_timeout(10000)  # 10s para garantir renderização completa (Vivo TV)
 
             # 5. Usar AIExtractor.extract_all
             extractor = AIExtractor()
