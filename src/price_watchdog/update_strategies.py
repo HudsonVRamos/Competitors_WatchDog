@@ -40,28 +40,20 @@ async def main() -> None:
         for config in all_configs:
             competitor_name = config.competitor.name if config.competitor else ""
 
-            if "HBO Max" in competitor_name:
-                # HBO Max: preços no formato "12x R$XX,XX/mês"
-                # Regex captura o valor após "12x R$"
-                config.extraction_strategy = "regex"
-                config.selector_or_pattern = (
-                    r"12x\s*R\$\s*(\d[\d.]*,\d{2})"
-                )
-                logger.info(
-                    "  %s -> regex (12x R$XX,XX)", config.product_name
-                )
-            else:
-                # Claro e Vivo: usar regex (funciona perfeitamente)
-                config.extraction_strategy = "regex"
-                config.selector_or_pattern = (
-                    r"R\$\s*(\d[\d.]*,\d{2})"
-                )
-                logger.info(
-                    "  %s -> regex", config.product_name
-                )
+            # Todos usam AI (Claude 4.6) - scraper faz scroll+full_page
+            config.extraction_strategy = "ai"
+            config.selector_or_pattern = (
+                f"Encontre o preço mensal do '{config.product_name}'. "
+                "O preço está em formato brasileiro (R$ XX,XX ou R$XX,XX/mês). "
+                "Se houver parcelamento (12x R$XX,XX/mês), retorne o valor da parcela mensal."
+            )
+            logger.info(
+                "  %s (%s) -> ai", config.product_name, competitor_name
+            )
 
         logger.info(
-            "Estratégias atualizadas: HBO Max=ai, Claro/Vivo=regex"
+            "Todos os %d ProductConfigs atualizados para AI com scroll.",
+            len(all_configs),
         )
 
     logger.info("Atualização concluída.")
