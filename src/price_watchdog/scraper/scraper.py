@@ -151,6 +151,10 @@ class PriceScraper:
             except Exception:
                 pass  # Timeout OK
 
+            # Se é site da Vivo, inserir CEP para desbloquear preços
+            if "vivo.com.br" in message.page_url:
+                await self._fill_vivo_cep(page)
+
             # 3. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
 
@@ -339,6 +343,10 @@ class PriceScraper:
             except Exception:
                 pass  # Timeout OK
 
+            # Se é site da Vivo, inserir CEP para desbloquear preços
+            if "vivo.com.br" in message.page_url:
+                await self._fill_vivo_cep(page)
+
             # 3. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
 
@@ -381,6 +389,73 @@ class PriceScraper:
                     await playwright_instance.stop()
                 except Exception:
                     pass
+
+    async def _fill_vivo_cep(self, page: Page) -> None:
+        """Insere CEP no site da Vivo para desbloquear preços.
+
+        O site da Vivo exige CEP para mostrar preços. Este método
+        clica em "Trocar localização" e insere o CEP de Taboão da Serra/SP.
+
+        Args:
+            page: Página Playwright já navegada.
+        """
+        try:
+            logger.info("Vivo TV: tentando inserir CEP 06764040...")
+
+            # Tentar clicar no botão "Trocar localização"
+            location_btn = await page.query_selector(
+                'a:has-text("Trocar localização"), '
+                'button:has-text("Trocar localização"), '
+                '[data-testid="change-location"], '
+                '.location-change'
+            )
+
+            if location_btn:
+                await location_btn.click()
+                await page.wait_for_timeout(2000)
+
+            # Procurar campo de CEP
+            cep_input = await page.query_selector(
+                'input[placeholder*="CEP"], '
+                'input[name*="cep"], '
+                'input[id*="cep"], '
+                'input[type="tel"][maxlength="9"], '
+                'input[type="tel"][maxlength="8"]'
+            )
+
+            if cep_input:
+                await cep_input.click()
+                await cep_input.fill("06764040")
+                await page.wait_for_timeout(1000)
+
+                # Tentar pressionar Enter ou clicar botão de confirmar
+                await page.keyboard.press("Enter")
+                await page.wait_for_timeout(3000)
+
+                logger.info("Vivo TV: CEP 06764040 inserido com sucesso")
+            else:
+                # Tentar via JavaScript diretamente
+                await page.evaluate("""
+                    () => {
+                        const inputs = document.querySelectorAll('input');
+                        for (const input of inputs) {
+                            if (input.placeholder && input.placeholder.toLowerCase().includes('cep')) {
+                                input.value = '06764040';
+                                input.dispatchEvent(new Event('input', {bubbles: true}));
+                                input.dispatchEvent(new Event('change', {bubbles: true}));
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                """)
+                await page.wait_for_timeout(3000)
+                logger.info("Vivo TV: CEP inserido via JS fallback")
+
+        except Exception as e:
+            logger.warning(
+                "Vivo TV: falha ao inserir CEP: %s", e
+            )
 
     async def _scroll_page(self, page: Page) -> None:
         """Scroll incremental para forçar lazy-loading.
