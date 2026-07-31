@@ -41,15 +41,14 @@ async def main() -> None:
             competitor_name = config.competitor.name if config.competitor else ""
 
             if "HBO Max" in competitor_name:
-                # HBO Max: usar AI (site dinâmico, preços em cards JS)
-                config.extraction_strategy = "ai"
+                # HBO Max: preços no formato "12x R$XX,XX/mês"
+                # Regex captura o valor após "12x R$"
+                config.extraction_strategy = "regex"
                 config.selector_or_pattern = (
-                    f"Encontre o preço mensal do '{config.product_name}'. "
-                    "O preço está no formato R$XX,XX/mês dentro de um card de plano. "
-                    "Retorne o preço exato em formato brasileiro."
+                    r"12x\s*R\$\s*(\d[\d.]*,\d{2})"
                 )
                 logger.info(
-                    "  %s -> ai (Claude 4.6)", config.product_name
+                    "  %s -> regex (12x R$XX,XX)", config.product_name
                 )
             else:
                 # Claro e Vivo: usar regex (funciona perfeitamente)
