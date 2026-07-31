@@ -391,70 +391,80 @@ class PriceScraper:
                     pass
 
     async def _fill_vivo_cep(self, page: Page) -> None:
-        """Insere CEP no site da Vivo para desbloquear preços.
+        """Seta localização São Paulo no site da Vivo via cookie/localStorage.
 
-        O site da Vivo exige CEP para mostrar preços. Este método
-        clica em "Trocar localização" e insere o CEP de Taboão da Serra/SP.
+        O site da Vivo usa IP-based geolocation. Como o worker roda nos EUA,
+        preciso forçar a localização via cookie ou localStorage antes
+        da página carregar os preços.
 
         Args:
             page: Página Playwright já navegada.
         """
         try:
-            logger.info("Vivo TV: tentando inserir CEP 06764040...")
+            logger.info("Vivo TV: setando localização São Paulo via JS...")
 
-            # Tentar clicar no botão "Trocar localização"
-            location_btn = await page.query_selector(
-                'a:has-text("Trocar localização"), '
-                'button:has-text("Trocar localização"), '
-                '[data-testid="change-location"], '
-                '.location-change'
-            )
+            # Setar localStorage com localização de São Paulo
+            await page.evaluate("""
+                () => {
+                    // Tentar setar localização via localStorage
+                    localStorage.setItem('userLocation', JSON.stringify({
+                        city: 'São Paulo',
+                        state: 'SP',
+                        cep: '06764040',
+                        ddd: '11'
+                    }));
+                    localStorage.setItem('selectedCity', 'São Paulo');
+                    localStorage.setItem('selectedState', 'SP');
+                    localStorage.setItem('cep', '06764040');
+                    localStorage.setItem('userCep', '06764040');
+                    localStorage.setItem('location', 'SP');
+                    localStorage.setItem('ddd', '11');
+                }
+            """)
 
-            if location_btn:
-                await location_btn.click()
-                await page.wait_for_timeout(2000)
+            # Setar cookies de localização
+            await page.context.add_cookies([
+                {
+                    "name": "user_location",
+                    "value": "SP",
+                    "domain": ".vivo.com.br",
+                    "path": "/",
+                },
+                {
+                    "name": "user_city",
+                    "value": "Sao Paulo",
+                    "domain": ".vivo.com.br",
+                    "path": "/",
+                },
+                {
+                    "name": "user_cep",
+                    "value": "06764040",
+                    "domain": ".vivo.com.br",
+                    "path": "/",
+                },
+                {
+                    "name": "user_ddd",
+                    "value": "11",
+                    "domain": ".vivo.com.br",
+                    "path": "/",
+                },
+            ])
 
-            # Procurar campo de CEP
-            cep_input = await page.query_selector(
-                'input[placeholder*="CEP"], '
-                'input[name*="cep"], '
-                'input[id*="cep"], '
-                'input[type="tel"][maxlength="9"], '
-                'input[type="tel"][maxlength="8"]'
-            )
+            # Recarregar a página para aplicar a localização
+            await page.reload(wait_until="domcontentloaded")
+            await page.wait_for_timeout(5000)
 
-            if cep_input:
-                await cep_input.click()
-                await cep_input.fill("06764040")
-                await page.wait_for_timeout(1000)
+            # Esperar network idle
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
 
-                # Tentar pressionar Enter ou clicar botão de confirmar
-                await page.keyboard.press("Enter")
-                await page.wait_for_timeout(3000)
-
-                logger.info("Vivo TV: CEP 06764040 inserido com sucesso")
-            else:
-                # Tentar via JavaScript diretamente
-                await page.evaluate("""
-                    () => {
-                        const inputs = document.querySelectorAll('input');
-                        for (const input of inputs) {
-                            if (input.placeholder && input.placeholder.toLowerCase().includes('cep')) {
-                                input.value = '06764040';
-                                input.dispatchEvent(new Event('input', {bubbles: true}));
-                                input.dispatchEvent(new Event('change', {bubbles: true}));
-                                return true;
-                            }
-                        }
-                        return false;
-                    }
-                """)
-                await page.wait_for_timeout(3000)
-                logger.info("Vivo TV: CEP inserido via JS fallback")
+            logger.info("Vivo TV: página recarregada com localização SP")
 
         except Exception as e:
             logger.warning(
-                "Vivo TV: falha ao inserir CEP: %s", e
+                "Vivo TV: falha ao setar localização: %s", e
             )
 
     async def _scroll_page(self, page: Page) -> None:
