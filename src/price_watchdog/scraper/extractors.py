@@ -611,6 +611,14 @@ class AIExtractor(BaseExtractor):
                 # Checar tamanho do arquivo (Bedrock max = 5MB)
                 if len(image_bytes) <= 5_000_000:
                     return image_bytes
+                # Dimensões OK mas arquivo muito grande → converter para JPEG
+                buffer = BytesIO()
+                if img.mode == "RGBA":
+                    img = img.convert("RGB")
+                img.save(buffer, format="JPEG", quality=75)
+                result = buffer.getvalue()
+                logger.info("Convertido para JPEG (size): %d bytes", len(result))
+                return result
 
             # Redimensionar se necessário
             if width > max_dimension or height > max_dimension:
