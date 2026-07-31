@@ -150,7 +150,7 @@ class PriceScraper:
 
             # 4. Voltar ao topo e capturar full_page screenshot
             await page.evaluate("window.scrollTo(0, 0)")
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(2000)  # Esperar conteúdo estabilizar
 
             screenshot_bytes = await page.screenshot(
                 full_page=True,
@@ -332,7 +332,7 @@ class PriceScraper:
 
             # 4. Voltar ao topo
             await page.evaluate("window.scrollTo(0, 0)")
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(2000)  # Esperar conteúdo estabilizar
 
             # 5. Usar AIExtractor.extract_all
             extractor = AIExtractor()
