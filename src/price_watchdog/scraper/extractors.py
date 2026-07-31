@@ -263,12 +263,12 @@ class AIExtractor(BaseExtractor):
     ) -> ExtractionResult:
         """Extrai preço usando screenshot + Bedrock AI.
 
-        Scroll a página para encontrar seção de preços, captura
-        screenshot do viewport (alta resolução), envia ao Bedrock
-        e valida confidence.
+        O PriceScraper já fez scroll e capturou full-page screenshot.
+        Aqui capturamos um screenshot do viewport atual (que mostra
+        a página toda renderizada) e enviamos ao Bedrock.
 
         Args:
-            page: Página Playwright já navegada.
+            page: Página Playwright já navegada e scrollada.
             product_description: Descrição adicional do produto para o prompt.
             product_name: Nome do produto sendo monitorado.
 
@@ -276,65 +276,24 @@ class AIExtractor(BaseExtractor):
             ExtractionResult com preço e confidence, ou falha com razão.
         """
         try:
-            # Scroll pela página capturando screenshots parciais
-            # até encontrar preços com confidence suficiente
-            page_height = await page.evaluate("document.body.scrollHeight")
-            viewport_height = 1080
-            max_scrolls = min(8, page_height // viewport_height + 1)
+            # Capturar screenshot full-page (scraper já fez scroll)
+            screenshot_bytes = await page.screenshot(full_page=True)
 
-            best_result: ExtractionResult | None = None
-            best_confidence = 0.0
+            if not screenshot_bytes:
+                return ExtractionResult(
+                    success=False,
+                    failure_reason="Falha ao capturar screenshot da página",
+                )
 
-            for i in range(max_scrolls):
-                scroll_y = i * viewport_height
-                await page.evaluate(f"window.scrollTo(0, {scroll_y})")
-                await page.wait_for_timeout(500)
+            # Resize para Bedrock (max 8000px, max 4.5MB)
+            screenshot_bytes = self._resize_image_if_needed(screenshot_bytes)
 
-                # Capturar screenshot do viewport atual
-                screenshot_bytes = await page.screenshot(full_page=False)
-
-                if not screenshot_bytes:
-                    continue
-
-                # Chamar Bedrock com este viewport
-                try:
-                    result = await self._invoke_bedrock_with_retry(
-                        screenshot_bytes, product_name, product_description
-                    )
-
-                    # Se encontrou preço com confidence suficiente, retorna
-                    if result.success and result.confidence and result.confidence >= self.MIN_CONFIDENCE:
-                        logger.info(
-                            "Preço encontrado no scroll %d para '%s': confidence=%.1f%%",
-                            i, product_name, result.confidence,
-                        )
-                        return result
-
-                    # Guardar melhor resultado
-                    if result.confidence and result.confidence > best_confidence:
-                        best_confidence = result.confidence
-                        best_result = result
-
-                except Exception as e:
-                    logger.warning(
-                        "Scroll %d falhou para '%s': %s", i, product_name, e
-                    )
-                    continue
-
-            # Se nenhum scroll deu confidence suficiente, retorna o melhor
-            if best_result and best_result.success:
-                return best_result
-
-            # Nenhum preço encontrado em nenhum viewport
-            logger.warning(
-                "AI não encontrou preço em nenhum scroll para '%s' (melhor confidence: %.1f%%)",
-                product_name, best_confidence,
+            # Chamar Bedrock com retry
+            result = await self._invoke_bedrock_with_retry(
+                screenshot_bytes, product_name, product_description
             )
-            return ExtractionResult(
-                success=False,
-                confidence=best_confidence,
-                failure_reason="low_confidence",
-            )
+
+            return result
 
         except Exception as e:
             logger.error(
@@ -348,9 +307,9 @@ class AIExtractor(BaseExtractor):
             )
 
     def _resize_image_if_needed(
-        self, image_bytes: bytes, max_dimension: int = 4000
+        self, image_bytes: bytes, max_dimension: int = 8000
     ) -> bytes:
-        """Redimensiona imagem se exceder max_dimension pixels.
+        """Redimensiona imagem se exceder limites do Bedrock.
 
         Args:
             image_bytes: Bytes da imagem PNG.
@@ -367,31 +326,41 @@ class AIExtractor(BaseExtractor):
             width, height = img.size
 
             if width <= max_dimension and height <= max_dimension:
-                return image_bytes
+                # Checar tamanho do arquivo
+                if len(image_bytes) <= 4_500_000:
+                    return image_bytes
 
-            # Calcular fator de escala
-            scale = min(max_dimension / width, max_dimension / height)
-            new_width = int(width * scale)
-            new_height = int(height * scale)
+            # Redimensionar se necessário
+            if width > max_dimension or height > max_dimension:
+                scale = min(max_dimension / width, max_dimension / height)
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                img = img.resize((new_width, new_height), Image.LANCZOS)
+                logger.info(
+                    "Imagem redimensionada de %dx%d para %dx%d",
+                    width, height, new_width, new_height,
+                )
 
-            img = img.resize((new_width, new_height), Image.LANCZOS)
-
+            # Salvar como PNG
             buffer = BytesIO()
             img.save(buffer, format="PNG")
-            logger.info(
-                "Imagem redimensionada de %dx%d para %dx%d",
-                width, height, new_width, new_height,
-            )
-            return buffer.getvalue()
+            result = buffer.getvalue()
+
+            # Se > 4.5MB, converter para JPEG
+            if len(result) > 4_500_000:
+                buffer = BytesIO()
+                if img.mode == "RGBA":
+                    img = img.convert("RGB")
+                img.save(buffer, format="JPEG", quality=80)
+                result = buffer.getvalue()
+                logger.info("Convertido para JPEG: %d bytes", len(result))
+
+            return result
         except ImportError:
-            logger.warning(
-                "Pillow não disponível, enviando imagem sem redimensionar"
-            )
+            logger.warning("Pillow não disponível")
             return image_bytes
         except Exception as e:
-            logger.warning(
-                "Falha ao redimensionar imagem: %s", e
-            )
+            logger.warning("Falha ao redimensionar: %s", e)
             return image_bytes
 
     @retry(
