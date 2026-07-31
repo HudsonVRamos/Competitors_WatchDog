@@ -263,10 +263,9 @@ class AIExtractor(BaseExtractor):
     ) -> ExtractionResult:
         """Extrai preço usando screenshot + Bedrock AI.
 
-        Captura screenshot da página, redimensiona se necessário
-        (max 4000px em qualquer dimensão para respeitar limites do Bedrock),
-        envia ao Bedrock com prompt pedindo identificação do preço,
-        e valida a confidence.
+        Scroll a página para encontrar seção de preços, captura
+        screenshot do viewport (alta resolução), envia ao Bedrock
+        e valida confidence.
 
         Args:
             page: Página Playwright já navegada.
@@ -277,24 +276,65 @@ class AIExtractor(BaseExtractor):
             ExtractionResult com preço e confidence, ou falha com razão.
         """
         try:
-            # Capturar screenshot full-page para AI (garante que preços abaixo do fold sejam visíveis)
-            screenshot_bytes = await page.screenshot(full_page=True)
+            # Scroll pela página capturando screenshots parciais
+            # até encontrar preços com confidence suficiente
+            page_height = await page.evaluate("document.body.scrollHeight")
+            viewport_height = 1080
+            max_scrolls = min(8, page_height // viewport_height + 1)
 
-            if not screenshot_bytes:
-                return ExtractionResult(
-                    success=False,
-                    failure_reason="Falha ao capturar screenshot da página",
-                )
+            best_result: ExtractionResult | None = None
+            best_confidence = 0.0
 
-            # Redimensionar se necessário (max 7000px em qualquer dimensão)
-            screenshot_bytes = self._resize_image_if_needed(screenshot_bytes, max_dimension=7000)
+            for i in range(max_scrolls):
+                scroll_y = i * viewport_height
+                await page.evaluate(f"window.scrollTo(0, {scroll_y})")
+                await page.wait_for_timeout(500)
 
-            # Chamar Bedrock com retry
-            result = await self._invoke_bedrock_with_retry(
-                screenshot_bytes, product_name, product_description
+                # Capturar screenshot do viewport atual
+                screenshot_bytes = await page.screenshot(full_page=False)
+
+                if not screenshot_bytes:
+                    continue
+
+                # Chamar Bedrock com este viewport
+                try:
+                    result = await self._invoke_bedrock_with_retry(
+                        screenshot_bytes, product_name, product_description
+                    )
+
+                    # Se encontrou preço com confidence suficiente, retorna
+                    if result.success and result.confidence and result.confidence >= self.MIN_CONFIDENCE:
+                        logger.info(
+                            "Preço encontrado no scroll %d para '%s': confidence=%.1f%%",
+                            i, product_name, result.confidence,
+                        )
+                        return result
+
+                    # Guardar melhor resultado
+                    if result.confidence and result.confidence > best_confidence:
+                        best_confidence = result.confidence
+                        best_result = result
+
+                except Exception as e:
+                    logger.warning(
+                        "Scroll %d falhou para '%s': %s", i, product_name, e
+                    )
+                    continue
+
+            # Se nenhum scroll deu confidence suficiente, retorna o melhor
+            if best_result and best_result.success:
+                return best_result
+
+            # Nenhum preço encontrado em nenhum viewport
+            logger.warning(
+                "AI não encontrou preço em nenhum scroll para '%s' (melhor confidence: %.1f%%)",
+                product_name, best_confidence,
             )
-
-            return result
+            return ExtractionResult(
+                success=False,
+                confidence=best_confidence,
+                failure_reason="low_confidence",
+            )
 
         except Exception as e:
             logger.error(
