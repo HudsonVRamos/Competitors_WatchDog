@@ -30,7 +30,38 @@ async def main() -> None:
     logger.info("Atualizando estratégias para ai_all...")
 
     async with get_session() as session:
-        # Buscar TODOS os ProductConfigs
+        # Atualizar URL da Claro TV+
+        from price_watchdog.models.entities import Competitor
+
+        stmt_claro = select(Competitor).where(
+            Competitor.name == "Claro TV+"
+        )
+        result_claro = await session.execute(stmt_claro)
+        claro = result_claro.scalar_one_or_none()
+
+        if claro:
+            # Atualizar base_url e page_url dos configs
+            claro.base_url = "https://www.claro.com.br/claro-tv-mais/box"
+
+            configs_stmt = select(ProductConfig).where(
+                ProductConfig.competitor_id == claro.id
+            )
+            configs_result = await session.execute(configs_stmt)
+            configs = list(configs_result.scalars().all())
+
+            for config in configs:
+                config.page_url = (
+                    "https://www.claro.com.br/claro-tv-mais/box"
+                )
+                config.extraction_strategy = "ai_all"
+                config.selector_or_pattern = ""
+                logger.info(
+                    "  Claro: %s -> URL atualizada", config.product_name
+                )
+
+            logger.info("Claro TV+ URL atualizada para claro.com.br/claro-tv-mais/box")
+
+        # Buscar TODOS os ProductConfigs e setar ai_all
         all_configs_stmt = select(ProductConfig).options(
             selectinload(ProductConfig.competitor)
         )
