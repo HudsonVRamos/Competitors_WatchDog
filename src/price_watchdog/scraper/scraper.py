@@ -104,6 +104,10 @@ class PriceScraper:
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/120.0.0.0 Safari/537.36"
                 ),
+                locale="pt-BR",
+                timezone_id="America/Sao_Paulo",
+                geolocation={"latitude": -23.5505, "longitude": -46.6333},
+                permissions=["geolocation"],
             )
             page = await context.new_page()
 
@@ -143,6 +147,7 @@ class PriceScraper:
             screenshot_bytes = await page.screenshot(
                 full_page=True,
                 type="png",
+                timeout=60000,
             )
             logger.info(
                 "Screenshot full-page capturado: %d bytes",

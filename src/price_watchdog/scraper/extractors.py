@@ -420,15 +420,18 @@ class AIExtractor(BaseExtractor):
         image_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
         prompt = (
-            f"Analise esta screenshot de uma página web e identifique o preço "
+            f"Analise esta screenshot de uma página web brasileira e identifique o preço "
             f"do produto '{product_name}'."
         )
         if product_description:
-            prompt += f" Descrição adicional: {product_description}."
+            prompt += f" Contexto: {product_description}."
         prompt += (
+            "\n\nIMPORTANTE: O preço está em Reais brasileiros (R$). "
+            "Procure por valores no formato R$ XX,XX ou R$XX,XX/mês. "
+            "Se houver parcelamento como '12x R$34,90/mês', retorne o valor da parcela (34,90)."
             "\n\nRetorne APENAS um JSON no formato: "
             '{"price": "valor no formato R$ X.XXX,XX", "confidence": número de 0 a 100}'
-            "\n\nSe não encontrar o preço, retorne: "
+            "\n\nSe não encontrar o preço do produto específico, retorne: "
             '{"price": null, "confidence": 0}'
         )
 
