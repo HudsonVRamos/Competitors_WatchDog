@@ -7,6 +7,7 @@ sem acoplamento com SQLAlchemy ou banco de dados.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -46,6 +47,26 @@ class ExtractionResult:
 
 
 @dataclass
+class MultiPriceExtractionResult:
+    """Resultado de extração múltipla de preços de uma página.
+
+    Usado quando a estratégia é "ai_all": Claude extrai TODOS os
+    planos/preços visíveis na página de um concorrente de uma vez.
+
+    Attributes:
+        success: Se a extração foi bem-sucedida
+        plans: Lista de planos encontrados [{"name": "...", "price": 99.90}]
+        failure_reason: Razão da falha (None se sucesso)
+        screenshot_bytes: Bytes do screenshot capturado
+    """
+
+    success: bool
+    plans: list[dict[str, Any]] = field(default_factory=list)
+    failure_reason: str | None = None
+    screenshot_bytes: bytes | None = None
+
+
+@dataclass
 class ValidationResult:
     """Resultado da validação de um ProductConfig.
 
@@ -65,16 +86,20 @@ class PriceCheckMessage:
     Contém todos os dados necessários para um worker realizar
     a extração de preço de um concorrente.
 
+    Quando extraction_strategy="ai_all", o worker extrai TODOS os
+    planos da página de uma vez (1 mensagem por concorrente).
+
     Attributes:
-        product_config_id: ID do ProductConfig
+        product_config_id: ID do ProductConfig (ou primeiro config do grupo)
         competitor_id: ID do Competitor
         competitor_name: Nome do concorrente
-        product_name: Nome do produto
+        product_name: Nome do produto (ou vazio para ai_all)
         page_url: URL da página a ser acessada
-        extraction_strategy: Estratégia de extração (css_selector, regex, ai)
+        extraction_strategy: Estratégia ("css_selector", "regex", "ai", "ai_all")
         selector_or_pattern: Seletor CSS ou padrão regex
         our_price: Preço de referência próprio
         cycle_id: ID do ciclo de monitoramento
+        multi_extraction: Flag indicando extração múltipla
     """
 
     product_config_id: str
@@ -82,10 +107,11 @@ class PriceCheckMessage:
     competitor_name: str
     product_name: str
     page_url: str
-    extraction_strategy: str  # "css_selector" | "regex" | "ai"
+    extraction_strategy: str  # "css_selector" | "regex" | "ai" | "ai_all"
     selector_or_pattern: str
     our_price: float
     cycle_id: str
+    multi_extraction: bool = False
 
 
 @dataclass

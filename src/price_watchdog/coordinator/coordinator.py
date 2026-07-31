@@ -158,11 +158,11 @@ class PriceMonitoringCoordinator:
         cycle: PriceCycle,
         configs: list,
     ) -> int:
-        """Publica mensagens SQS para cada ProductConfig.
+        """Publica mensagens SQS agrupadas por concorrente.
 
-        Converte cada ProductConfig em um PriceCheckMessage e
-        utiliza o SQSPublisher.publish_all() para enviar todas
-        as mensagens em batches de 10.
+        Para configs com estratégia "ai_all", agrupa por competitor_id
+        e envia 1 mensagem por concorrente. Para outras estratégias,
+        envia 1 mensagem por ProductConfig (comportamento original).
 
         Args:
             cycle: O PriceCycle corrente.
@@ -180,7 +180,47 @@ class PriceMonitoringCoordinator:
 
         messages: list[PriceCheckMessage] = []
 
+        # Agrupar configs "ai_all" por competitor_id
+        ai_all_by_competitor: dict[str, list] = {}
+        individual_configs: list = []
+
         for config in configs:
+            if config.extraction_strategy == "ai_all":
+                comp_id = str(config.competitor_id)
+                if comp_id not in ai_all_by_competitor:
+                    ai_all_by_competitor[comp_id] = []
+                ai_all_by_competitor[comp_id].append(config)
+            else:
+                individual_configs.append(config)
+
+        # 1 mensagem por concorrente para ai_all
+        for comp_id, comp_configs in ai_all_by_competitor.items():
+            first_config = comp_configs[0]
+            message = PriceCheckMessage(
+                product_config_id=str(first_config.id),
+                competitor_id=comp_id,
+                competitor_name=(
+                    first_config.competitor.name
+                    if first_config.competitor
+                    else ""
+                ),
+                product_name="",  # Todos os planos
+                page_url=first_config.page_url,
+                extraction_strategy="ai_all",
+                selector_or_pattern="",
+                our_price=first_config.our_price,
+                cycle_id=str(cycle.id),
+                multi_extraction=True,
+            )
+            messages.append(message)
+
+        logger.info(
+            "Agrupados %d concorrentes para extração multi-plano",
+            len(ai_all_by_competitor),
+        )
+
+        # 1 mensagem por config para estratégias individuais
+        for config in individual_configs:
             message = PriceCheckMessage(
                 product_config_id=str(config.id),
                 competitor_id=str(config.competitor_id),
@@ -195,13 +235,17 @@ class PriceMonitoringCoordinator:
                 selector_or_pattern=config.selector_or_pattern,
                 our_price=config.our_price,
                 cycle_id=str(cycle.id),
+                multi_extraction=False,
             )
             messages.append(message)
 
         logger.info(
-            "Publicando %d mensagens para ciclo %s",
+            "Publicando %d mensagens para ciclo %s "
+            "(%d multi-plano, %d individuais)",
             len(messages),
             cycle.id,
+            len(ai_all_by_competitor),
+            len(individual_configs),
         )
 
         total_sent = await self._publisher.publish_all(

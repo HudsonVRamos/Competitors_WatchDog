@@ -18,7 +18,11 @@ from io import BytesIO
 
 from playwright.async_api import async_playwright, Page
 
-from price_watchdog.models.dataclasses import PriceCheckMessage, ScrapeResult
+from price_watchdog.models.dataclasses import (
+    MultiPriceExtractionResult,
+    PriceCheckMessage,
+    ScrapeResult,
+)
 from price_watchdog.scraper.extractors import (
     AIExtractor,
     BaseExtractor,
@@ -220,6 +224,144 @@ class PriceScraper:
                 except Exception:
                     pass
 
+    async def scrape_all(
+        self, message: PriceCheckMessage
+    ) -> MultiPriceExtractionResult:
+        """Extrai TODOS os planos/preços de uma página de concorrente.
+
+        Fluxo idêntico ao scrape() para navegação, mas usa
+        AIExtractor.extract_all() para obter todos os planos de uma vez.
+
+        Args:
+            message: Mensagem com dados do concorrente (page_url, etc).
+
+        Returns:
+            MultiPriceExtractionResult com lista de planos encontrados.
+        """
+        logger.info(
+            "Iniciando scraping multi-plano: "
+            "concorrente='%s', url='%s'",
+            message.competitor_name,
+            message.page_url,
+        )
+
+        playwright_instance = None
+        browser = None
+        page: Page | None = None
+
+        try:
+            # 1. Abrir browser com viewport
+            playwright_instance = await async_playwright().start()
+            browser = await playwright_instance.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+            )
+            logger.info("Browser Chromium inicializado (multi).")
+
+            context = await browser.new_context(
+                viewport={
+                    "width": _VIEWPORT_WIDTH,
+                    "height": _VIEWPORT_HEIGHT,
+                },
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                locale="pt-BR",
+                timezone_id="America/Sao_Paulo",
+                geolocation={
+                    "latitude": -23.5505,
+                    "longitude": -46.6333,
+                },
+                permissions=["geolocation"],
+            )
+            page = await context.new_page()
+
+            # 2. Navegar até a URL
+            try:
+                response = await page.goto(
+                    message.page_url,
+                    timeout=_NAVIGATION_TIMEOUT_MS,
+                    wait_until="domcontentloaded",
+                )
+                if response and response.status >= 400:
+                    logger.error(
+                        "HTTP %d para '%s'",
+                        response.status,
+                        message.page_url,
+                    )
+                    return MultiPriceExtractionResult(
+                        success=False,
+                        failure_reason=(
+                            f"HTTP {response.status}"
+                        ),
+                    )
+                logger.info(
+                    "Página carregada (multi): %s",
+                    message.page_url,
+                )
+            except Exception as nav_error:
+                logger.error(
+                    "Erro de navegação para '%s': %s",
+                    message.page_url,
+                    nav_error,
+                )
+                return MultiPriceExtractionResult(
+                    success=False,
+                    failure_reason=(
+                        f"Erro de navegação: {str(nav_error)}"
+                    ),
+                )
+
+            # 3. Scroll incremental para forçar lazy-loading
+            await self._scroll_page(page)
+
+            # 4. Voltar ao topo
+            await page.evaluate("window.scrollTo(0, 0)")
+            await page.wait_for_timeout(500)
+
+            # 5. Usar AIExtractor.extract_all
+            extractor = AIExtractor()
+            result = await extractor.extract_all(
+                page, message.competitor_name
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error(
+                "Erro inesperado durante scraping multi de '%s': %s",
+                message.competitor_name,
+                e,
+                exc_info=True,
+            )
+            return MultiPriceExtractionResult(
+                success=False,
+                failure_reason=f"Erro inesperado: {str(e)}",
+            )
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            if playwright_instance:
+                try:
+                    await playwright_instance.stop()
+                except Exception:
+                    pass
+
     async def _scroll_page(self, page: Page) -> None:
         """Scroll incremental para forçar lazy-loading.
 
@@ -331,7 +473,7 @@ class PriceScraper:
         """Retorna o extractor adequado para a estratégia.
 
         Args:
-            strategy: Nome da estratégia (css_selector, regex, ai).
+            strategy: Nome da estratégia (css_selector, regex, ai, ai_all).
 
         Returns:
             Instância do extractor correspondente.
@@ -340,6 +482,7 @@ class PriceScraper:
             "css_selector": CSSSelectorExtractor(),
             "regex": RegexExtractor(),
             "ai": AIExtractor(),
+            "ai_all": AIExtractor(),
         }
 
         if strategy not in extractors:

@@ -23,7 +23,10 @@ from tenacity import (
     retry_if_exception_type,
 )
 
-from price_watchdog.models.dataclasses import ExtractionResult
+from price_watchdog.models.dataclasses import (
+    ExtractionResult,
+    MultiPriceExtractionResult,
+)
 from price_watchdog.scraper.price_parser import PriceParser
 
 logger = logging.getLogger(__name__)
@@ -306,6 +309,285 @@ class AIExtractor(BaseExtractor):
                 failure_reason=f"Erro na extração AI: {str(e)}",
             )
 
+    async def extract_all(
+        self, page: Page, competitor_name: str
+    ) -> MultiPriceExtractionResult:
+        """Extrai TODOS os planos e preços visíveis na página.
+
+        Captura screenshot full-page e pede ao Claude para listar
+        todos os planos/preços encontrados na página do concorrente.
+
+        Args:
+            page: Página Playwright já navegada e scrollada.
+            competitor_name: Nome do concorrente (para contexto).
+
+        Returns:
+            MultiPriceExtractionResult com lista de planos encontrados.
+        """
+        try:
+            # Capturar screenshot full-page
+            screenshot_bytes = await page.screenshot(full_page=True)
+
+            if not screenshot_bytes:
+                return MultiPriceExtractionResult(
+                    success=False,
+                    failure_reason="Falha ao capturar screenshot da página",
+                )
+
+            # Resize para Bedrock (max 8000px, max 4.5MB)
+            screenshot_bytes = self._resize_image_if_needed(
+                screenshot_bytes
+            )
+
+            # Chamar Bedrock com prompt multi-plano
+            result = await self._invoke_bedrock_all_with_retry(
+                screenshot_bytes, competitor_name
+            )
+            result.screenshot_bytes = screenshot_bytes
+
+            return result
+
+        except Exception as e:
+            logger.error(
+                "Erro ao extrair todos os preços via AI para '%s': %s",
+                competitor_name,
+                str(e),
+            )
+            return MultiPriceExtractionResult(
+                success=False,
+                failure_reason=f"Erro na extração AI multi: {str(e)}",
+            )
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=4),
+        retry=retry_if_exception_type((Exception,)),
+        reraise=True,
+    )
+    async def _invoke_bedrock_all_with_retry(
+        self,
+        screenshot_bytes: bytes,
+        competitor_name: str,
+    ) -> MultiPriceExtractionResult:
+        """Invoca Bedrock para extração multi-plano com retry.
+
+        Args:
+            screenshot_bytes: Bytes do screenshot capturado.
+            competitor_name: Nome do concorrente.
+
+        Returns:
+            MultiPriceExtractionResult com planos encontrados.
+        """
+        try:
+            response = await self._call_bedrock_all(
+                screenshot_bytes, competitor_name
+            )
+            return response
+        except Exception as e:
+            logger.warning(
+                "Tentativa de chamada ao Bedrock (all) falhou "
+                "para '%s': %s",
+                competitor_name,
+                str(e),
+            )
+            raise
+
+    async def _call_bedrock_all(
+        self,
+        screenshot_bytes: bytes,
+        competitor_name: str,
+    ) -> MultiPriceExtractionResult:
+        """Chama Bedrock pedindo TODOS os planos/preços da página.
+
+        Args:
+            screenshot_bytes: Bytes do screenshot.
+            competitor_name: Nome do concorrente.
+
+        Returns:
+            MultiPriceExtractionResult parseado da resposta.
+        """
+        image_base64 = base64.b64encode(
+            screenshot_bytes
+        ).decode("utf-8")
+
+        prompt = (
+            "Analise esta screenshot de uma página web de um "
+            "provedor de TV/streaming brasileiro. "
+            "Liste TODOS os planos e seus preços mensais "
+            "visíveis na página. "
+            "Se houver parcelamento (ex: 12x R$34,90/mês), "
+            "retorne o valor da parcela mensal. "
+            "\n\nRetorne APENAS um JSON no formato: "
+            '{"plans": [{"name": "Nome do Plano", '
+            '"price": "R$ XX,XX"}, ...]}'
+            "\n\nSe não encontrar nenhum plano/preço, retorne: "
+            '{"plans": []}'
+        )
+
+        request_body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 1024,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": image_base64,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt,
+                        },
+                    ],
+                }
+            ],
+        }
+
+        session = aioboto3.Session()
+        async with session.client(
+            "bedrock-runtime", region_name=self._region_name
+        ) as bedrock_client:
+            response = await bedrock_client.invoke_model(
+                modelId=self.MODEL_ID,
+                contentType="application/json",
+                accept="application/json",
+                body=json.dumps(request_body),
+            )
+
+            response_body = await response["body"].read()
+            response_json = json.loads(response_body)
+
+        return self._parse_bedrock_all_response(
+            response_json, competitor_name
+        )
+
+    def _parse_bedrock_all_response(
+        self, response_json: dict, competitor_name: str
+    ) -> MultiPriceExtractionResult:
+        """Parseia resposta do Bedrock para extração multi-plano.
+
+        Args:
+            response_json: JSON de resposta do Bedrock.
+            competitor_name: Nome do concorrente.
+
+        Returns:
+            MultiPriceExtractionResult com planos parseados.
+        """
+        try:
+            content = response_json.get("content", [])
+            if not content:
+                return MultiPriceExtractionResult(
+                    success=False,
+                    failure_reason="Resposta do Bedrock sem conteúdo",
+                )
+
+            text_response = ""
+            for block in content:
+                if block.get("type") == "text":
+                    text_response = block.get("text", "")
+                    break
+
+            if not text_response:
+                return MultiPriceExtractionResult(
+                    success=False,
+                    failure_reason="Resposta do Bedrock sem texto",
+                )
+
+            # Extrair JSON da resposta
+            json_match = re.search(
+                r"\{[^{}]*\"plans\"\s*:\s*\[.*?\]\s*\}",
+                text_response,
+                re.DOTALL,
+            )
+            if not json_match:
+                json_match = re.search(
+                    r"\{.*\}", text_response, re.DOTALL
+                )
+
+            if not json_match:
+                return MultiPriceExtractionResult(
+                    success=False,
+                    failure_reason=(
+                        "Resposta do Bedrock não contém JSON válido"
+                    ),
+                )
+
+            result_data = json.loads(json_match.group())
+            raw_plans = result_data.get("plans", [])
+
+            if not raw_plans:
+                return MultiPriceExtractionResult(
+                    success=True,
+                    plans=[],
+                    failure_reason=(
+                        "AI não encontrou planos/preços na página"
+                    ),
+                )
+
+            # Parsear preços de cada plano
+            parsed_plans: list[dict] = []
+            for plan in raw_plans:
+                plan_name = plan.get("name", "").strip()
+                price_text = plan.get("price", "")
+
+                if not plan_name or not price_text:
+                    continue
+
+                price = PriceParser.parse(str(price_text))
+                if price is not None:
+                    parsed_plans.append(
+                        {"name": plan_name, "price": price}
+                    )
+                else:
+                    logger.warning(
+                        "Não foi possível parsear preço '%s' "
+                        "do plano '%s' (%s)",
+                        price_text,
+                        plan_name,
+                        competitor_name,
+                    )
+
+            logger.info(
+                "Extração multi-plano para '%s': %d planos "
+                "encontrados",
+                competitor_name,
+                len(parsed_plans),
+            )
+
+            return MultiPriceExtractionResult(
+                success=len(parsed_plans) > 0,
+                plans=parsed_plans,
+                failure_reason=(
+                    None
+                    if parsed_plans
+                    else "Nenhum preço pôde ser parseado"
+                ),
+            )
+
+        except (
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as e:
+            logger.error(
+                "Erro ao parsear resposta multi do Bedrock "
+                "para '%s': %s",
+                competitor_name,
+                str(e),
+            )
+            return MultiPriceExtractionResult(
+                success=False,
+                failure_reason=(
+                    f"Erro ao parsear resposta AI: {str(e)}"
+                ),
+            )
+
     def _resize_image_if_needed(
         self, image_bytes: bytes, max_dimension: int = 8000
     ) -> bytes:
@@ -530,21 +812,8 @@ class AIExtractor(BaseExtractor):
             price_text = result_data.get("price")
             confidence = float(result_data.get("confidence", 0))
 
-            # Validar confidence >= 80%
-            if confidence < self.MIN_CONFIDENCE:
-                logger.warning(
-                    "Confidence %.1f%% abaixo do mínimo (%.1f%%) para '%s'",
-                    confidence,
-                    self.MIN_CONFIDENCE,
-                    product_name,
-                )
-                return ExtractionResult(
-                    success=False,
-                    confidence=confidence,
-                    failure_reason="low_confidence",
-                )
-
-            # Parsear preço se não for null
+            # Validar: se retornou preço, aceitar independente da confidence
+            # (o Claude é conservador com confidence em páginas longas)
             if price_text is None:
                 return ExtractionResult(
                     success=False,

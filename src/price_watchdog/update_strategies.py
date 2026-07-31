@@ -1,8 +1,8 @@
 """Script para atualizar estratégias de extração dos concorrentes.
 
-Atualiza os ProductConfigs com estratégias mais adequadas baseado
-nos resultados reais de scraping. Muda Claro TV+ para regex
-(CSS selectors genéricos não funcionam) e ajusta os padrões.
+Atualiza os ProductConfigs para usar estratégia "ai_all" que extrai
+TODOS os planos de uma página de concorrente em uma única chamada
+ao Claude, em vez de buscar 1 produto por vez.
 """
 
 import asyncio
@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
-    """Atualiza estratégias de extração no banco."""
+    """Atualiza estratégias de extração no banco para ai_all."""
     from price_watchdog.database import get_session
     from price_watchdog.models.entities import ProductConfig
 
-    logger.info("Atualizando estratégias de extração...")
+    logger.info("Atualizando estratégias para ai_all...")
 
     async with get_session() as session:
         # Buscar TODOS os ProductConfigs
@@ -38,21 +38,23 @@ async def main() -> None:
         all_configs = list(all_configs_result.scalars().all())
 
         for config in all_configs:
-            competitor_name = config.competitor.name if config.competitor else ""
-
-            # Todos usam AI (Claude 4.6) - scraper faz scroll+full_page
-            config.extraction_strategy = "ai"
-            config.selector_or_pattern = (
-                f"Encontre o preço mensal do '{config.product_name}'. "
-                "O preço está em formato brasileiro (R$ XX,XX ou R$XX,XX/mês). "
-                "Se houver parcelamento (12x R$XX,XX/mês), retorne o valor da parcela mensal."
+            competitor_name = (
+                config.competitor.name
+                if config.competitor
+                else ""
             )
+
+            # Todos usam ai_all - extração multi-plano
+            config.extraction_strategy = "ai_all"
+            config.selector_or_pattern = ""
             logger.info(
-                "  %s (%s) -> ai", config.product_name, competitor_name
+                "  %s (%s) -> ai_all",
+                config.product_name,
+                competitor_name,
             )
 
         logger.info(
-            "Todos os %d ProductConfigs atualizados para AI com scroll.",
+            "Todos os %d ProductConfigs atualizados para ai_all.",
             len(all_configs),
         )
 
