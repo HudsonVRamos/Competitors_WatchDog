@@ -22,6 +22,8 @@ class Competitor(Base):
     name = Column(String(255), nullable=False)
     base_url = Column(String(2048), nullable=False)
     is_active = Column(Boolean, default=True)
+    intelligence_enabled = Column(Boolean, default=False)
+    intelligence_home_url = Column(String(2048), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -62,6 +64,9 @@ class PriceCycle(Base):
     products_succeeded = Column(Integer, default=0)
     products_failed = Column(Integer, default=0)
     alerts_triggered = Column(Integer, default=0)
+    intelligence_attempted = Column(Integer, default=0)
+    intelligence_succeeded = Column(Integer, default=0)
+    intelligence_failed = Column(Integer, default=0)
 
     price_records = relationship("PriceRecord", back_populates="cycle")
 

@@ -54,10 +54,13 @@ def consolidator():
     price_store = AsyncMock()
     report_generator = MagicMock()
     email_notifier = AsyncMock()
+    intelligence_store = AsyncMock()
+    intelligence_store.get_records_for_cycle.return_value = []
     return CycleConsolidator(
         price_store=price_store,
         report_generator=report_generator,
         email_notifier=email_notifier,
+        intelligence_store=intelligence_store,
     )
 
 
@@ -110,7 +113,7 @@ class TestConsolidate:
 
         # Verifica que relatório foi gerado
         consolidator._report_generator.generate.assert_called_once_with(
-            records, cycle
+            records, cycle, []
         )
         # Verifica que email foi enviado
         consolidator._email_notifier.send_report.assert_called_once()
@@ -253,6 +256,70 @@ class TestConsolidate:
         assert mock_db_cycle.status == "completed"
         assert mock_db_cycle.ended_at is not None
 
+    @pytest.mark.asyncio
+    async def test_contadores_inteligencia_calculados_corretamente(
+        self, consolidator
+    ):
+        """Verifica cálculo correto dos contadores de inteligência."""
+        cycle = _make_cycle(total_products=2)
+        records = [
+            _make_record(cycle.id, "success"),
+            _make_record(cycle.id, "success"),
+        ]
+        consolidator._price_store.get_cycle_records.return_value = (
+            records
+        )
+        consolidator._report_generator.generate.return_value = (
+            b"data"
+        )
+
+        # Simular registros de inteligência com statuses variados
+        intel_record_success = MagicMock()
+        intel_record_success.extraction_status = "success"
+        intel_record_success.extraction_latency_ms = 1000.0
+        intel_record_success.retry_count = 0
+        intel_record_no_pkg = MagicMock()
+        intel_record_no_pkg.extraction_status = "no_packages_found"
+        intel_record_no_pkg.extraction_latency_ms = 800.0
+        intel_record_no_pkg.retry_count = 0
+        intel_record_failed = MagicMock()
+        intel_record_failed.extraction_status = "failed"
+        intel_record_failed.extraction_latency_ms = 500.0
+        intel_record_failed.retry_count = 2
+
+        consolidator._intelligence_store.get_records_for_cycle.return_value = [
+            intel_record_success,
+            intel_record_no_pkg,
+            intel_record_failed,
+        ]
+
+        mock_db_cycle = _make_cycle(total_products=2)
+        mock_db_cycle.id = cycle.id
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one.return_value = mock_db_cycle
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        with patch(
+            "price_watchdog.coordinator.cycle_consolidator"
+            ".get_session"
+        ) as mock_get_session, patch(
+            "price_watchdog.coordinator.cycle_consolidator"
+            ".settings"
+        ) as mock_settings:
+            mock_settings.recipients_list = []
+            mock_ctx = AsyncMock()
+            mock_ctx.__aenter__.return_value = mock_session
+            mock_ctx.__aexit__.return_value = False
+            mock_get_session.return_value = mock_ctx
+
+            await consolidator.consolidate(cycle)
+
+        # Verificar contadores de inteligência
+        assert mock_db_cycle.intelligence_attempted == 3
+        assert mock_db_cycle.intelligence_succeeded == 2  # success + no_packages_found
+        assert mock_db_cycle.intelligence_failed == 1
+
 
 class TestWaitForCompletion:
     """Testes para o método wait_for_completion."""
@@ -365,3 +432,115 @@ class TestWaitForCompletion:
                 await consolidator.wait_for_completion(
                     str(cycle.id), poll_interval=1
                 )
+
+
+class TestLogCycleIntelligenceMetrics:
+    """Testes para o método log_cycle_intelligence_metrics."""
+
+    def test_metricas_calculadas_corretamente(self, consolidator):
+        """Verifica cálculo correto das métricas de inteligência."""
+        # Simular registros com métricas variadas
+        record_1 = MagicMock()
+        record_1.extraction_status = "success"
+        record_1.extraction_latency_ms = 1500.0
+        record_1.retry_count = 1
+
+        record_2 = MagicMock()
+        record_2.extraction_status = "success"
+        record_2.extraction_latency_ms = 2500.0
+        record_2.retry_count = 0
+
+        record_3 = MagicMock()
+        record_3.extraction_status = "failed"
+        record_3.extraction_latency_ms = 500.0
+        record_3.retry_count = 3
+
+        record_4 = MagicMock()
+        record_4.extraction_status = "no_packages_found"
+        record_4.extraction_latency_ms = 1000.0
+        record_4.retry_count = 0
+
+        records = [record_1, record_2, record_3, record_4]
+
+        metrics = consolidator.log_cycle_intelligence_metrics(
+            cycle_id="test-cycle-123",
+            intelligence_records=records,
+        )
+
+        assert metrics["intelligence_extractions_success"] == 3  # success + no_packages_found
+        assert metrics["intelligence_extractions_failed"] == 1
+        assert metrics["intelligence_avg_latency_ms"] == 1375.0  # (1500+2500+500+1000)/4
+        assert metrics["intelligence_total_retries"] == 4  # 1+0+3+0
+        assert metrics["metric_type"] == "intelligence_cycle"
+        assert metrics["cycle_id"] == "test-cycle-123"
+
+    def test_metricas_com_lista_vazia(self, consolidator):
+        """Retorna zeros quando não há registros de inteligência."""
+        metrics = consolidator.log_cycle_intelligence_metrics(
+            cycle_id="empty-cycle",
+            intelligence_records=[],
+        )
+
+        assert metrics["intelligence_extractions_success"] == 0
+        assert metrics["intelligence_extractions_failed"] == 0
+        assert metrics["intelligence_avg_latency_ms"] == 0.0
+        assert metrics["intelligence_total_retries"] == 0
+
+    def test_metricas_com_latencia_null(self, consolidator):
+        """Calcula latência média ignorando registros com latência null."""
+        record_1 = MagicMock()
+        record_1.extraction_status = "success"
+        record_1.extraction_latency_ms = 2000.0
+        record_1.retry_count = 0
+
+        record_2 = MagicMock()
+        record_2.extraction_status = "failed"
+        record_2.extraction_latency_ms = None  # Sem latência (falha antes da chamada)
+        record_2.retry_count = 0
+
+        metrics = consolidator.log_cycle_intelligence_metrics(
+            cycle_id="partial-cycle",
+            intelligence_records=[record_1, record_2],
+        )
+
+        # Latência média só considera record_1 (2000.0)
+        assert metrics["intelligence_avg_latency_ms"] == 2000.0
+        assert metrics["intelligence_extractions_success"] == 1
+        assert metrics["intelligence_extractions_failed"] == 1
+
+    def test_metricas_logadas_no_logger_dedicado(self, consolidator):
+        """Verifica que métricas são emitidas no logger de inteligência."""
+        record = MagicMock()
+        record.extraction_status = "success"
+        record.extraction_latency_ms = 1000.0
+        record.retry_count = 2
+
+        with patch(
+            "price_watchdog.coordinator.cycle_consolidator"
+            ".intelligence_metrics_logger"
+        ) as mock_logger:
+            consolidator.log_cycle_intelligence_metrics(
+                cycle_id="log-test-cycle",
+                intelligence_records=[record],
+            )
+
+            mock_logger.info.assert_called_once()
+            call_args = mock_logger.info.call_args
+            # Verifica prefixo [INTELLIGENCE_METRICS]
+            assert "[INTELLIGENCE_METRICS]" in call_args[0][0]
+            # Verifica que cycle_id está nos args
+            assert "log-test-cycle" in call_args[0][1]
+
+    def test_metricas_com_retry_count_null(self, consolidator):
+        """Trata retry_count null como 0."""
+        record = MagicMock()
+        record.extraction_status = "success"
+        record.extraction_latency_ms = 1000.0
+        record.retry_count = None
+
+        metrics = consolidator.log_cycle_intelligence_metrics(
+            cycle_id="null-retry-cycle",
+            intelligence_records=[record],
+        )
+
+        assert metrics["intelligence_total_retries"] == 0

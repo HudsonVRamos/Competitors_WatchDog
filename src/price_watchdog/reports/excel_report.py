@@ -16,6 +16,9 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from price_watchdog.models.entities import PriceCycle, PriceRecord
+from price_watchdog.models.intelligence_entities import (
+    CompetitorIntelligenceRecord,
+)
 
 
 @dataclass
@@ -53,7 +56,7 @@ _RED_FILL = PatternFill(
     start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"
 )
 
-# Colunas do relatório
+# Colunas do relatório de preços
 _COLUMNS = [
     "Concorrente",
     "Produto",
@@ -62,6 +65,24 @@ _COLUMNS = [
     "Diferença (R$)",
     "Diferença (%)",
     "Status",
+]
+
+# Colunas da aba "Composição de Pacotes"
+_COMPOSITION_COLUMNS = [
+    "Concorrente",
+    "Nome do Pacote",
+    "Preço Default",
+    "Preço Promocional",
+    "Duração Promo (meses)",
+    "Canais Lineares",
+    "Telas Simultâneas",
+    "Fibra (Sim/Não)",
+    "Velocidade Fibra (Mbps)",
+    "Internet Móvel (Sim/Não)",
+    "Velocidade Móvel (Mbps)",
+    "Streaming 1",
+    "Streaming 2",
+    "Streaming 3",
 ]
 
 
@@ -78,7 +99,11 @@ class ExcelReportGenerator:
     """
 
     def generate(
-        self, records: list[PriceRecord], cycle: PriceCycle
+        self,
+        records: list[PriceRecord],
+        cycle: PriceCycle,
+        intelligence_records: list[CompetitorIntelligenceRecord]
+        | None = None,
     ) -> bytes:
         """Gera arquivo Excel com formatação Traffic Light.
 
@@ -86,10 +111,17 @@ class ExcelReportGenerator:
         e gera uma planilha com as colunas obrigatórias e formatação
         condicional por cores.
 
+        Quando intelligence_records contém registros com status
+        "success", gera abas adicionais de "Composição de Pacotes"
+        e "Comunicação Comercial". Se nenhum registro tiver sucesso,
+        as abas são omitidas.
+
         Args:
             records: Lista de PriceRecords do ciclo (pode incluir
                 falhas, que serão filtradas).
             cycle: PriceCycle correspondente ao relatório.
+            intelligence_records: Lista opcional de
+                CompetitorIntelligenceRecords do ciclo.
 
         Returns:
             Conteúdo do arquivo Excel em bytes.
@@ -102,6 +134,20 @@ class ExcelReportGenerator:
         self._write_header(ws, cycle)
         self._write_data(ws, rows)
         self._adjust_column_widths(ws)
+
+        # Gerar abas de inteligência se houver dados bem-sucedidos
+        if intelligence_records:
+            has_success = any(
+                r.extraction_status == "success"
+                for r in intelligence_records
+            )
+            if has_success:
+                self._generate_composition_tab(
+                    wb, intelligence_records
+                )
+                self._generate_communication_tab(
+                    wb, intelligence_records
+                )
 
         buffer = BytesIO()
         wb.save(buffer)
@@ -297,3 +343,272 @@ class ExcelReportGenerator:
         for col_idx, min_width in enumerate(min_widths, start=1):
             col_letter = get_column_letter(col_idx)
             ws.column_dimensions[col_letter].width = min_width
+
+    def has_successful_intelligence(
+        self,
+        intelligence_records: list[CompetitorIntelligenceRecord]
+        | None,
+    ) -> bool:
+        """Verifica se há registros de inteligência bem-sucedidos.
+
+        Utilizado pelo CycleConsolidator para decidir se deve
+        incluir indicação de falha no email de consolidação.
+
+        Args:
+            intelligence_records: Lista de registros de inteligência
+                do ciclo.
+
+        Returns:
+            True se ao menos um registro tem status "success".
+        """
+        if not intelligence_records:
+            return False
+        return any(
+            r.extraction_status == "success"
+            for r in intelligence_records
+        )
+
+    def _generate_communication_tab(
+        self,
+        wb: Workbook,
+        intelligence_records: list[CompetitorIntelligenceRecord],
+    ) -> None:
+        """Gera aba 'Comunicação Comercial' no relatório Excel.
+
+        Cria uma worksheet com dados de comunicação comercial
+        de todos os concorrentes com extração bem-sucedida.
+        Uma linha por concorrente.
+
+        Colunas: Concorrente, Palavras-chave, Descrição Banner,
+        Resumo Posicionamento.
+
+        Args:
+            wb: Workbook do openpyxl onde a aba será adicionada.
+            intelligence_records: Lista de
+                CompetitorIntelligenceRecords do ciclo.
+        """
+        ws = wb.create_sheet(title="Comunicação Comercial")
+
+        # Colunas da aba de comunicação comercial
+        columns = [
+            "Concorrente",
+            "Palavras-chave",
+            "Descrição Banner",
+            "Resumo Posicionamento",
+        ]
+
+        # Escrever cabeçalhos
+        header_font = Font(bold=True, size=11)
+        for col_idx, col_name in enumerate(columns, start=1):
+            cell = ws.cell(row=1, column=col_idx, value=col_name)
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        # Filtrar apenas registros com extração bem-sucedida
+        success_records = [
+            record
+            for record in intelligence_records
+            if record.extraction_status == "success"
+        ]
+
+        # Escrever dados — uma linha por concorrente
+        for row_idx, record in enumerate(success_records, start=2):
+            # Nome do concorrente
+            competitor_name = ""
+            if record.competitor:
+                competitor_name = record.competitor.name
+            ws.cell(
+                row=row_idx, column=1, value=competitor_name
+            )
+
+            # Palavras-chave separadas por vírgula
+            keywords_text = ""
+            if record.commercial_keywords:
+                keywords_text = ", ".join(
+                    record.commercial_keywords
+                )
+            ws.cell(
+                row=row_idx, column=2, value=keywords_text
+            )
+
+            # Descrição do banner
+            ws.cell(
+                row=row_idx,
+                column=3,
+                value=record.home_banner_description or "",
+            )
+
+            # Resumo do posicionamento
+            ws.cell(
+                row=row_idx,
+                column=4,
+                value=record.commercial_positioning_summary or "",
+            )
+
+        # Ajustar larguras das colunas
+        comm_widths = [20, 40, 50, 40]
+        for col_idx, width in enumerate(comm_widths, start=1):
+            col_letter = get_column_letter(col_idx)
+            ws.column_dimensions[col_letter].width = width
+
+    def _generate_composition_tab(
+        self,
+        wb: Workbook,
+        intelligence_records: list[CompetitorIntelligenceRecord],
+    ) -> None:
+        """Gera aba "Composição de Pacotes" no relatório Excel.
+
+        Cria uma worksheet com uma linha por pacote identificado,
+        exibindo todos os atributos de composição. Campos null
+        resultam em células vazias.
+
+        Filtra apenas registros com extraction_status == "success".
+
+        Args:
+            wb: Workbook do openpyxl onde a aba será adicionada.
+            intelligence_records: Lista de
+                CompetitorIntelligenceRecords do ciclo (pode incluir
+                falhas, que serão filtradas).
+        """
+        ws = wb.create_sheet(title="Composição de Pacotes")
+
+        # Cabeçalhos
+        header_font = Font(bold=True, size=11)
+        for col_idx, col_name in enumerate(
+            _COMPOSITION_COLUMNS, start=1
+        ):
+            cell = ws.cell(
+                row=1, column=col_idx, value=col_name
+            )
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        # Dados — uma linha por pacote
+        current_row = 2
+        for record in intelligence_records:
+            if record.extraction_status != "success":
+                continue
+
+            # Obter nome do concorrente via relationship
+            competitor_name = ""
+            if record.competitor:
+                competitor_name = record.competitor.name
+
+            for package in record.packages:
+                ws.cell(
+                    row=current_row,
+                    column=1,
+                    value=competitor_name,
+                )
+                ws.cell(
+                    row=current_row,
+                    column=2,
+                    value=package.plan_name,
+                )
+                # Preço Default
+                if package.default_price is not None:
+                    cell = ws.cell(
+                        row=current_row,
+                        column=3,
+                        value=package.default_price,
+                    )
+                    cell.number_format = '#,##0.00'
+                # Preço Promocional
+                if package.promotional_price is not None:
+                    cell = ws.cell(
+                        row=current_row,
+                        column=4,
+                        value=package.promotional_price,
+                    )
+                    cell.number_format = '#,##0.00'
+                # Duração Promo (meses)
+                if package.promotional_period_months is not None:
+                    ws.cell(
+                        row=current_row,
+                        column=5,
+                        value=package.promotional_period_months,
+                    )
+                # Canais Lineares
+                if package.linear_channels is not None:
+                    ws.cell(
+                        row=current_row,
+                        column=6,
+                        value=package.linear_channels,
+                    )
+                # Telas Simultâneas
+                if package.simultaneous_screens is not None:
+                    ws.cell(
+                        row=current_row,
+                        column=7,
+                        value=package.simultaneous_screens,
+                    )
+                # Fibra (Sim/Não)
+                if package.has_fiber is not None:
+                    fiber_val = (
+                        "Sim" if package.has_fiber else "Não"
+                    )
+                    ws.cell(
+                        row=current_row,
+                        column=8,
+                        value=fiber_val,
+                    )
+                # Velocidade Fibra (Mbps)
+                if package.fiber_speed_mbps is not None:
+                    ws.cell(
+                        row=current_row,
+                        column=9,
+                        value=package.fiber_speed_mbps,
+                    )
+                # Internet Móvel (Sim/Não)
+                if package.has_mobile_internet is not None:
+                    mobile_val = (
+                        "Sim"
+                        if package.has_mobile_internet
+                        else "Não"
+                    )
+                    ws.cell(
+                        row=current_row,
+                        column=10,
+                        value=mobile_val,
+                    )
+                # Velocidade Móvel (Mbps)
+                if package.mobile_speed_mbps is not None:
+                    ws.cell(
+                        row=current_row,
+                        column=11,
+                        value=package.mobile_speed_mbps,
+                    )
+                # Streaming 1
+                if package.bundled_streaming_1:
+                    ws.cell(
+                        row=current_row,
+                        column=12,
+                        value=package.bundled_streaming_1,
+                    )
+                # Streaming 2
+                if package.bundled_streaming_2:
+                    ws.cell(
+                        row=current_row,
+                        column=13,
+                        value=package.bundled_streaming_2,
+                    )
+                # Streaming 3
+                if package.bundled_streaming_3:
+                    ws.cell(
+                        row=current_row,
+                        column=14,
+                        value=package.bundled_streaming_3,
+                    )
+
+                current_row += 1
+
+        # Ajustar largura das colunas
+        composition_widths = [
+            18, 22, 14, 16, 18, 15, 17, 14, 20, 18,
+            18, 14, 14, 14,
+        ]
+        for col_idx, width in enumerate(
+            composition_widths, start=1
+        ):
+            col_letter = get_column_letter(col_idx)
+            ws.column_dimensions[col_letter].width = width

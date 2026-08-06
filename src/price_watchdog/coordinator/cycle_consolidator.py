@@ -8,6 +8,7 @@ relatório Excel, envio de email).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime
 
@@ -18,9 +19,16 @@ from price_watchdog.config import settings
 from price_watchdog.database import get_session
 from price_watchdog.models.entities import PriceCycle, PriceRecord
 from price_watchdog.reports.excel_report import ExcelReportGenerator
+from price_watchdog.storage.intelligence_store import IntelligenceStore
 from price_watchdog.storage.price_store import PriceStore
 
 logger = logging.getLogger(__name__)
+
+# Logger dedicado para métricas de inteligência competitiva,
+# separado do logger principal (que inclui métricas de preço).
+intelligence_metrics_logger = logging.getLogger(
+    "price_watchdog.metrics.intelligence"
+)
 
 # Timeout máximo de espera: 2 horas (em segundos)
 _MAX_WAIT_SECONDS = 2 * 60 * 60
@@ -40,10 +48,84 @@ class CycleConsolidator:
         price_store: PriceStore,
         report_generator: ExcelReportGenerator,
         email_notifier: EmailNotifier,
+        intelligence_store: IntelligenceStore | None = None,
     ) -> None:
         self._price_store = price_store
         self._report_generator = report_generator
         self._email_notifier = email_notifier
+        self._intelligence_store = intelligence_store or IntelligenceStore()
+
+    def log_cycle_intelligence_metrics(
+        self,
+        cycle_id: str,
+        intelligence_records: list,
+    ) -> dict:
+        """Registra métricas de inteligência competitiva de forma estruturada.
+
+        Calcula e loga métricas separadas das métricas de preço:
+        - intelligence_extractions_success: extrações com sucesso
+        - intelligence_extractions_failed: extrações com falha
+        - intelligence_avg_latency_ms: latência média de extração
+        - intelligence_total_retries: total de retries no ciclo
+
+        As métricas são emitidas em formato JSON estruturado em um
+        logger dedicado (price_watchdog.metrics.intelligence), garantindo
+        separação das métricas de preço.
+
+        Args:
+            cycle_id: ID do ciclo sendo consolidado.
+            intelligence_records: Lista de CompetitorIntelligenceRecord
+                do ciclo.
+
+        Returns:
+            Dict com as métricas calculadas (útil para testes).
+        """
+        extractions_success = sum(
+            1
+            for r in intelligence_records
+            if r.extraction_status in ("success", "no_packages_found")
+        )
+        extractions_failed = sum(
+            1
+            for r in intelligence_records
+            if r.extraction_status == "failed"
+        )
+
+        # Calcular latência média apenas dos registros que possuem valor
+        latencies = [
+            r.extraction_latency_ms
+            for r in intelligence_records
+            if r.extraction_latency_ms is not None
+        ]
+        avg_latency_ms = (
+            round(sum(latencies) / len(latencies), 2)
+            if latencies
+            else 0.0
+        )
+
+        # Somar total de retries do ciclo
+        total_retries = sum(
+            r.retry_count
+            for r in intelligence_records
+            if r.retry_count is not None
+        )
+
+        metrics = {
+            "metric_type": "intelligence_cycle",
+            "cycle_id": str(cycle_id),
+            "intelligence_extractions_success": extractions_success,
+            "intelligence_extractions_failed": extractions_failed,
+            "intelligence_avg_latency_ms": avg_latency_ms,
+            "intelligence_total_retries": total_retries,
+        }
+
+        intelligence_metrics_logger.info(
+            "[INTELLIGENCE_METRICS] cycle=%s | %s",
+            cycle_id,
+            json.dumps(metrics, ensure_ascii=False),
+        )
+
+        return metrics
 
     async def wait_for_completion(
         self,
@@ -145,6 +227,38 @@ class CycleConsolidator:
             if r.extraction_status in ("failed", "not_found")
         )
 
+        # Calcular contadores de inteligência competitiva
+        intelligence_records = (
+            await self._intelligence_store.get_records_for_cycle(
+                str(cycle.id)
+            )
+        )
+        intelligence_attempted = len(intelligence_records)
+        intelligence_succeeded = sum(
+            1
+            for r in intelligence_records
+            if r.extraction_status in ("success", "no_packages_found")
+        )
+        intelligence_failed = sum(
+            1
+            for r in intelligence_records
+            if r.extraction_status == "failed"
+        )
+
+        logger.info(
+            "Ciclo %s inteligência: attempted=%d, succeeded=%d, failed=%d",
+            cycle.id,
+            intelligence_attempted,
+            intelligence_succeeded,
+            intelligence_failed,
+        )
+
+        # Registrar métricas estruturadas de inteligência (separadas de preço)
+        self.log_cycle_intelligence_metrics(
+            cycle_id=str(cycle.id),
+            intelligence_records=intelligence_records,
+        )
+
         # Atualizar ciclo no banco
         async with get_session() as session:
             stmt = select(PriceCycle).where(
@@ -155,21 +269,28 @@ class CycleConsolidator:
 
             db_cycle.products_succeeded = succeeded
             db_cycle.products_failed = failed
+            db_cycle.intelligence_attempted = intelligence_attempted
+            db_cycle.intelligence_succeeded = intelligence_succeeded
+            db_cycle.intelligence_failed = intelligence_failed
             db_cycle.status = "completed"
             db_cycle.ended_at = datetime.utcnow()
 
             logger.info(
-                "Ciclo %s atualizado: succeeded=%d, failed=%d",
+                "Ciclo %s atualizado: succeeded=%d, failed=%d, "
+                "intel_attempted=%d, intel_succeeded=%d, intel_failed=%d",
                 cycle.id,
                 succeeded,
                 failed,
+                intelligence_attempted,
+                intelligence_succeeded,
+                intelligence_failed,
             )
 
         # Gerar relatório Excel
         report_bytes: bytes | None = None
         try:
             report_bytes = self._report_generator.generate(
-                records, cycle
+                records, cycle, intelligence_records
             )
             logger.info(
                 "Relatório Excel gerado para ciclo %s (%d bytes)",
@@ -183,6 +304,14 @@ class CycleConsolidator:
                 exc_info=True,
             )
 
+        # Determinar se inteligência falhou para todos os concorrentes
+        intelligence_all_failed = (
+            intelligence_attempted > 0
+            and not self._report_generator.has_successful_intelligence(
+                intelligence_records
+            )
+        )
+
         # Enviar email com relatório
         recipients = settings.recipients_list
         if report_bytes and recipients:
@@ -191,6 +320,7 @@ class CycleConsolidator:
                     report_bytes=report_bytes,
                     cycle=cycle,
                     recipients=recipients,
+                    intelligence_all_failed=intelligence_all_failed,
                 )
                 logger.info(
                     "Email de relatório enviado para %s", recipients

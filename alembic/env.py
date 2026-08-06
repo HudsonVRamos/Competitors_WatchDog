@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from price_watchdog.config import settings
 from price_watchdog.models.entities import Base
+from price_watchdog.models import intelligence_entities  # noqa: F401 - registra modelos no metadata
 
 # Objeto de configuração do Alembic (.ini)
 config = context.config

@@ -83,4 +83,6 @@ def deserialize_message(json_str: str) -> PriceCheckMessage:
         selector_or_pattern=str(data["selector_or_pattern"]),
         our_price=float(data["our_price"]),
         cycle_id=str(data["cycle_id"]),
+        intelligence_enabled=bool(data.get("intelligence_enabled", False)),
+        intelligence_home_url=data.get("intelligence_home_url"),
     )

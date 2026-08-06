@@ -19,6 +19,16 @@ from price_watchdog.models.entities import (
     PriceRecord,
     ProductConfig,
 )
+from price_watchdog.models.intelligence_dataclasses import (
+    CommercialCommunicationData,
+    IntelligenceAlert,
+    IntelligenceExtractionResult,
+    PackageCompositionData,
+)
+from price_watchdog.models.intelligence_entities import (
+    CompetitorIntelligenceRecord,
+    PackageComposition,
+)
 
 __all__ = [
     # Entidades SQLAlchemy
@@ -28,6 +38,9 @@ __all__ = [
     "PriceCycle",
     "PriceRecord",
     "PriceAlert",
+    # Entidades de Inteligência Competitiva
+    "CompetitorIntelligenceRecord",
+    "PackageComposition",
     # Dataclasses / DTOs
     "ScrapeResult",
     "ExtractionResult",
@@ -35,4 +48,9 @@ __all__ = [
     "PriceCheckMessage",
     "PriceComparison",
     "AlertThresholds",
+    # Inteligência Competitiva - DTOs
+    "PackageCompositionData",
+    "CommercialCommunicationData",
+    "IntelligenceExtractionResult",
+    "IntelligenceAlert",
 ]

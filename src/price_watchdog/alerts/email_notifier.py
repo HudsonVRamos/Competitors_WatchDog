@@ -1,6 +1,9 @@
 """Módulo de notificação por email via Amazon SES."""
 
+from __future__ import annotations
+
 import logging
+from datetime import datetime, timezone
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -16,6 +19,9 @@ from tenacity import (
 from price_watchdog.alerts.alert_service import PriceAlert
 from price_watchdog.config import settings
 from price_watchdog.models.entities import PriceCycle
+from price_watchdog.models.intelligence_dataclasses import (
+    IntelligenceAlert,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +87,7 @@ class EmailNotifier:
         report_bytes: bytes,
         cycle: PriceCycle,
         recipients: list[str],
+        intelligence_all_failed: bool = False,
     ) -> None:
         """Envia relatório Excel como anexo.
 
@@ -88,6 +95,9 @@ class EmailNotifier:
             report_bytes: Bytes do arquivo Excel gerado.
             cycle: Ciclo de monitoramento associado ao relatório.
             recipients: Lista de destinatários do email.
+            intelligence_all_failed: Se True, inclui indicação de
+                que a extração de inteligência falhou para todos
+                os concorrentes.
         """
         if not recipients:
             logger.warning(
@@ -96,7 +106,9 @@ class EmailNotifier:
             return
 
         subject = self._build_report_subject(cycle)
-        body = self._build_report_body(cycle)
+        body = self._build_report_body(
+            cycle, intelligence_all_failed=intelligence_all_failed
+        )
 
         msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
@@ -200,13 +212,36 @@ class EmailNotifier:
             f"{cycle.started_at.strftime('%d/%m/%Y %H:%M')}"
         )
 
-    def _build_report_body(self, cycle: PriceCycle) -> str:
-        """Constrói o corpo HTML do email de relatório."""
+    def _build_report_body(
+        self,
+        cycle: PriceCycle,
+        intelligence_all_failed: bool = False,
+    ) -> str:
+        """Constrói o corpo HTML do email de relatório.
+
+        Args:
+            cycle: PriceCycle com metadados do ciclo.
+            intelligence_all_failed: Se True, inclui indicação de
+                falha na extração de inteligência competitiva.
+        """
         ended = (
             cycle.ended_at.strftime("%d/%m/%Y %H:%M")
             if cycle.ended_at
             else "Em andamento"
         )
+
+        intelligence_notice = ""
+        if intelligence_all_failed:
+            intelligence_notice = """
+    <div style="background-color: #FFF3CD; border: 1px solid #FFEEBA; \
+border-radius: 4px; padding: 12px; margin-top: 16px;">
+        <strong style="color: #856404;">⚠️ Inteligência Competitiva</strong>
+        <p style="color: #856404; margin: 4px 0 0 0; font-size: 13px;">
+            A extração de inteligência competitiva falhou para todos os \
+concorrentes neste ciclo. As abas de composição de pacotes e \
+comunicação comercial foram omitidas do relatório.
+        </p>
+    </div>"""
 
         return f"""
 <html>
@@ -269,12 +304,177 @@ class EmailNotifier:
                 {cycle.alerts_triggered}
             </td>
         </tr>
-    </table>
+    </table>{intelligence_notice}
     <p style="color: #666; margin-top: 20px;">
         O relatório Excel detalhado está em anexo.
     </p>
     <p style="color: #666; font-size: 12px;">
         Gerado automaticamente pelo Price Watchdog.
+    </p>
+</body>
+</html>
+"""
+
+    async def send_intelligence_alert(
+        self,
+        alert: IntelligenceAlert,
+        recipients: list[str],
+    ) -> None:
+        """Envia email de alerta de inteligência competitiva.
+
+        Envia notificação para destinatários configurados quando
+        mudanças são detectadas em composição de pacotes ou
+        comunicação comercial de um concorrente.
+
+        Args:
+            alert: Alerta de inteligência competitiva.
+            recipients: Lista de destinatários do email.
+        """
+        if not recipients:
+            logger.warning(
+                "Nenhum destinatário configurado para "
+                "alerta de inteligência."
+            )
+            return
+
+        subject = self._build_intelligence_alert_subject(alert)
+        body = self._build_intelligence_alert_body(alert)
+
+        msg = MIMEMultipart()
+        msg["Subject"] = subject
+        msg["From"] = settings.ses_from_email
+        msg["To"] = ", ".join(recipients)
+        msg.attach(MIMEText(body, "html", "utf-8"))
+
+        try:
+            await self._send_raw_email(msg.as_bytes())
+            logger.info(
+                "Alerta de inteligência enviado para %s: "
+                "tipo=%s, concorrente=%s",
+                recipients,
+                alert.alert_type,
+                alert.competitor_name,
+            )
+        except Exception:
+            logger.error(
+                "Falha ao enviar alerta de inteligência após "
+                "3 tentativas: tipo=%s, concorrente=%s",
+                alert.alert_type,
+                alert.competitor_name,
+                exc_info=True,
+            )
+
+    def _build_intelligence_alert_subject(
+        self, alert: IntelligenceAlert
+    ) -> str:
+        """Constrói o assunto do email de alerta de inteligência."""
+        type_label = {
+            "package_composition_change": (
+                "📦 Mudança em Composição de Pacote"
+            ),
+            "communication_change": (
+                "📢 Mudança em Comunicação Comercial"
+            ),
+        }
+        label = type_label.get(alert.alert_type, alert.alert_type)
+        return (
+            f"[Price Watchdog] {label} - "
+            f"{alert.competitor_name}"
+        )
+
+    def _build_intelligence_alert_body(
+        self, alert: IntelligenceAlert
+    ) -> str:
+        """Constrói o corpo HTML do email de alerta de inteligência."""
+        now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
+
+        plan_row = ""
+        if alert.plan_name:
+            plan_row = f"""
+        <tr>
+            <td style="padding: 8px; border: 1px solid #ddd; \
+font-weight: bold;">
+                Plano
+            </td>
+            <td style="padding: 8px; border: 1px solid #ddd;">
+                {alert.plan_name}
+            </td>
+        </tr>"""
+
+        previous_display = (
+            alert.previous_value if alert.previous_value else "N/A"
+        )
+        current_display = (
+            alert.current_value if alert.current_value else "N/A"
+        )
+
+        type_description = {
+            "package_composition_change": (
+                "Mudança detectada na composição de pacote"
+            ),
+            "communication_change": (
+                "Mudança detectada na comunicação comercial"
+            ),
+        }
+        description = type_description.get(
+            alert.alert_type, "Mudança detectada"
+        )
+
+        return f"""
+<html>
+<body style="font-family: Arial, sans-serif; padding: 20px;">
+    <h2 style="color: #333;">{description}</h2>
+    <table style="border-collapse: collapse; width: 100%; \
+max-width: 600px;">
+        <tr>
+            <td style="padding: 8px; border: 1px solid #ddd; \
+font-weight: bold;">
+                Concorrente
+            </td>
+            <td style="padding: 8px; border: 1px solid #ddd;">
+                {alert.competitor_name}
+            </td>
+        </tr>{plan_row}
+        <tr>
+            <td style="padding: 8px; border: 1px solid #ddd; \
+font-weight: bold;">
+                Atributo Alterado
+            </td>
+            <td style="padding: 8px; border: 1px solid #ddd;">
+                {alert.attribute_name}
+            </td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border: 1px solid #ddd; \
+font-weight: bold;">
+                Valor Anterior
+            </td>
+            <td style="padding: 8px; border: 1px solid #ddd;">
+                {previous_display}
+            </td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border: 1px solid #ddd; \
+font-weight: bold;">
+                Valor Atual
+            </td>
+            <td style="padding: 8px; border: 1px solid #ddd;">
+                {current_display}
+            </td>
+        </tr>
+        <tr>
+            <td style="padding: 8px; border: 1px solid #ddd; \
+font-weight: bold;">
+                Data/Hora da Detecção
+            </td>
+            <td style="padding: 8px; border: 1px solid #ddd;">
+                {now}
+            </td>
+        </tr>
+    </table>
+    <p style="color: #666; margin-top: 20px; font-size: 12px;">
+        Este alerta foi gerado automaticamente pelo Price Watchdog
+        — módulo de inteligência competitiva.
     </p>
 </body>
 </html>

@@ -4,6 +4,8 @@ Responsável por converter textos contendo preços no formato brasileiro
 para valores float, tratando separadores de milhares e decimais.
 """
 
+from __future__ import annotations
+
 import logging
 import re
 

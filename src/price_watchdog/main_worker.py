@@ -20,9 +20,11 @@ from typing import TYPE_CHECKING
 
 from price_watchdog.alerts.alert_service import AlertService
 from price_watchdog.alerts.email_notifier import EmailNotifier
+from price_watchdog.comparator.change_detector import ChangeDetector
 from price_watchdog.comparator.comparator import PriceComparator
 from price_watchdog.models.dataclasses import PriceCheckMessage, ScrapeResult
 from price_watchdog.queue.consumer import SQSConsumer
+from price_watchdog.storage.intelligence_store import IntelligenceStore
 from price_watchdog.storage.price_store import PriceStore
 from price_watchdog.storage.screenshot_store import ScreenshotStore
 from price_watchdog.worker.worker import Worker
@@ -109,6 +111,10 @@ async def main() -> None:
     screenshot_store = ScreenshotStore()
     alert_service = AlertService()
     email_notifier = EmailNotifier()
+    intelligence_store = IntelligenceStore()
+    change_detector = ChangeDetector(
+        intelligence_store=intelligence_store,
+    )
 
     worker = Worker(
         consumer=consumer,
@@ -118,6 +124,8 @@ async def main() -> None:
         screenshot_store=screenshot_store,
         alert_service=alert_service,
         email_notifier=email_notifier,
+        intelligence_store=intelligence_store,
+        change_detector=change_detector,
     )
 
     # Configurar graceful shutdown

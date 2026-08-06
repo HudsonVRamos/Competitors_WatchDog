@@ -100,6 +100,8 @@ class PriceCheckMessage:
         our_price: Preço de referência próprio
         cycle_id: ID do ciclo de monitoramento
         multi_extraction: Flag indicando extração múltipla
+        intelligence_enabled: Flag indicando se inteligência competitiva está habilitada
+        intelligence_home_url: URL específica da home para extração de comunicação comercial
     """
 
     product_config_id: str
@@ -112,6 +114,8 @@ class PriceCheckMessage:
     our_price: float
     cycle_id: str
     multi_extraction: bool = False
+    intelligence_enabled: bool = False
+    intelligence_home_url: str | None = None
 
 
 @dataclass

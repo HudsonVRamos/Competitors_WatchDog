@@ -196,13 +196,26 @@ class PriceMonitoringCoordinator:
         # 1 mensagem por concorrente para ai_all
         for comp_id, comp_configs in ai_all_by_competitor.items():
             first_config = comp_configs[0]
+            competitor = first_config.competitor
+
+            # Determinar campos de inteligência competitiva
+            intel_enabled = (
+                competitor.intelligence_enabled
+                if competitor
+                else False
+            )
+            intel_home_url: str | None = None
+            if intel_enabled and competitor:
+                intel_home_url = (
+                    competitor.intelligence_home_url
+                    or competitor.base_url
+                )
+
             message = PriceCheckMessage(
                 product_config_id=str(first_config.id),
                 competitor_id=comp_id,
                 competitor_name=(
-                    first_config.competitor.name
-                    if first_config.competitor
-                    else ""
+                    competitor.name if competitor else ""
                 ),
                 product_name="",  # Todos os planos
                 page_url=first_config.page_url,
@@ -211,6 +224,8 @@ class PriceMonitoringCoordinator:
                 our_price=first_config.our_price,
                 cycle_id=str(cycle.id),
                 multi_extraction=True,
+                intelligence_enabled=intel_enabled,
+                intelligence_home_url=intel_home_url,
             )
             messages.append(message)
 
@@ -221,13 +236,26 @@ class PriceMonitoringCoordinator:
 
         # 1 mensagem por config para estratégias individuais
         for config in individual_configs:
+            competitor = config.competitor
+
+            # Determinar campos de inteligência competitiva
+            intel_enabled = (
+                competitor.intelligence_enabled
+                if competitor
+                else False
+            )
+            intel_home_url: str | None = None
+            if intel_enabled and competitor:
+                intel_home_url = (
+                    competitor.intelligence_home_url
+                    or competitor.base_url
+                )
+
             message = PriceCheckMessage(
                 product_config_id=str(config.id),
                 competitor_id=str(config.competitor_id),
                 competitor_name=(
-                    config.competitor.name
-                    if config.competitor
-                    else ""
+                    competitor.name if competitor else ""
                 ),
                 product_name=config.product_name,
                 page_url=config.page_url,
@@ -236,6 +264,8 @@ class PriceMonitoringCoordinator:
                 our_price=config.our_price,
                 cycle_id=str(cycle.id),
                 multi_extraction=False,
+                intelligence_enabled=intel_enabled,
+                intelligence_home_url=intel_home_url,
             )
             messages.append(message)
 

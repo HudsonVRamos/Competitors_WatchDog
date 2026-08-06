@@ -3,6 +3,7 @@
 import logging
 import re
 from datetime import datetime, timedelta
+from typing import Optional
 from urllib.parse import urlparse
 
 from sqlalchemy import func, select
@@ -20,6 +21,140 @@ logger = logging.getLogger(__name__)
 
 class CompetitorManager:
     """CRUD de concorrentes e configurações de produtos."""
+
+    @staticmethod
+    def validate_intelligence_url(url: Optional[str]) -> bool:
+        """Valida URL de inteligência competitiva.
+
+        Verifica:
+        - URL não vazia/None
+        - Tamanho máximo de 2048 caracteres
+        - Esquema http ou https
+        - Domínio válido (ao menos um ponto ou localhost)
+
+        Args:
+            url: URL a ser validada.
+
+        Returns:
+            True se a URL for válida, False caso contrário.
+        """
+        if not url:
+            return False
+
+        if len(url) > 2048:
+            return False
+
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+
+        # Validar esquema http/https
+        if parsed.scheme not in ("http", "https"):
+            return False
+
+        # Validar domínio presente e válido
+        netloc = parsed.netloc
+        if not netloc:
+            return False
+
+        # Extrair hostname (sem porta)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        # Aceitar localhost ou domínios com pelo menos um ponto
+        if hostname != "localhost" and "." not in hostname:
+            return False
+
+        return True
+
+    async def enable_intelligence(
+        self, competitor_id: str, home_url: Optional[str] = None
+    ) -> None:
+        """Habilita extração de inteligência competitiva para um concorrente.
+
+        Ativa o flag intelligence_enabled e opcionalmente configura
+        a URL da home para extração de comunicação comercial.
+
+        Args:
+            competitor_id: ID do concorrente a ser habilitado.
+            home_url: URL da home para extração (opcional).
+                Se fornecida, será validada antes de salvar.
+                Se None, mantém a URL existente.
+
+        Raises:
+            ValueError: Se home_url fornecida for inválida.
+            ValueError: Se o concorrente não for encontrado.
+        """
+        if home_url is not None and not self.validate_intelligence_url(home_url):
+            raise ValueError(
+                f"URL de inteligência inválida: {home_url}. "
+                "A URL deve usar esquema http ou https com domínio válido "
+                "e ter no máximo 2048 caracteres."
+            )
+
+        async with get_session() as session:
+            stmt = select(Competitor).where(
+                Competitor.id == competitor_id
+            )
+            result = await session.execute(stmt)
+            competitor = result.scalar_one_or_none()
+
+            if competitor is None:
+                raise ValueError(
+                    f"Concorrente não encontrado: {competitor_id}"
+                )
+
+            competitor.intelligence_enabled = True
+            if home_url is not None:
+                competitor.intelligence_home_url = home_url
+            competitor.updated_at = datetime.utcnow()
+
+            logger.info(
+                "Inteligência habilitada: competitor_id=%s, "
+                "home_url=%s",
+                competitor_id,
+                home_url or competitor.intelligence_home_url,
+            )
+
+    async def disable_intelligence(
+        self, competitor_id: str
+    ) -> None:
+        """Desabilita extração de inteligência competitiva para um concorrente.
+
+        Desativa o flag intelligence_enabled sem remover a URL configurada
+        nem dados históricos de inteligência existentes.
+
+        Args:
+            competitor_id: ID do concorrente a ser desabilitado.
+
+        Raises:
+            ValueError: Se o concorrente não for encontrado.
+        """
+        async with get_session() as session:
+            stmt = select(Competitor).where(
+                Competitor.id == competitor_id
+            )
+            result = await session.execute(stmt)
+            competitor = result.scalar_one_or_none()
+
+            if competitor is None:
+                raise ValueError(
+                    f"Concorrente não encontrado: {competitor_id}"
+                )
+
+            competitor.intelligence_enabled = False
+            # NÃO remove intelligence_home_url — preserva configuração
+            # NÃO remove dados históricos — append-only
+            competitor.updated_at = datetime.utcnow()
+
+            logger.info(
+                "Inteligência desabilitada: competitor_id=%s "
+                "(home_url preservada: %s)",
+                competitor_id,
+                competitor.intelligence_home_url,
+            )
 
     async def get_active_configs(self) -> list[ProductConfig]:
         """Retorna todos os ProductConfigs ativos.

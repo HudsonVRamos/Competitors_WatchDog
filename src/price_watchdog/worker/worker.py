@@ -15,7 +15,9 @@ from typing import TYPE_CHECKING, Protocol
 
 from price_watchdog.alerts.alert_service import AlertService
 from price_watchdog.alerts.email_notifier import EmailNotifier
+from price_watchdog.comparator.change_detector import ChangeDetector
 from price_watchdog.comparator.comparator import PriceComparator
+from price_watchdog.config import settings
 from price_watchdog.models.dataclasses import (
     AlertThresholds,
     MultiPriceExtractionResult,
@@ -23,8 +25,16 @@ from price_watchdog.models.dataclasses import (
     ScrapeResult,
 )
 from price_watchdog.models.entities import PriceRecord, ProductConfig
+from price_watchdog.models.intelligence_entities import (
+    CompetitorIntelligenceRecord,
+    PackageComposition,
+)
 from price_watchdog.queue.consumer import SQSConsumer
 from price_watchdog.registry.competitor_manager import CompetitorManager
+from price_watchdog.scraper.intelligence_extractor import (
+    AIIntelligenceExtractor,
+)
+from price_watchdog.storage.intelligence_store import IntelligenceStore
 from price_watchdog.storage.price_store import PriceStore
 from price_watchdog.storage.screenshot_store import ScreenshotStore
 
@@ -92,6 +102,9 @@ class Worker:
         alert_service: AlertService,
         email_notifier: EmailNotifier | None = None,
         competitor_manager: CompetitorManager | None = None,
+        intelligence_extractor: AIIntelligenceExtractor | None = None,
+        intelligence_store: IntelligenceStore | None = None,
+        change_detector: ChangeDetector | None = None,
     ) -> None:
         """Inicializa o Worker com suas dependências.
 
@@ -104,6 +117,12 @@ class Worker:
             alert_service: Serviço de avaliação de alertas de preço.
             email_notifier: Notificador por email (opcional).
             competitor_manager: Manager para busca/criação de configs.
+            intelligence_extractor: Extrator de inteligência
+                competitiva (opcional).
+            intelligence_store: Store de persistência de
+                inteligência (opcional).
+            change_detector: Detector de mudanças em inteligência
+                competitiva (opcional).
         """
         self._consumer = consumer
         self._scraper = scraper
@@ -113,6 +132,9 @@ class Worker:
         self._alert_service = alert_service
         self._email_notifier = email_notifier
         self._competitor_manager = competitor_manager
+        self._intelligence_extractor = intelligence_extractor
+        self._intelligence_store = intelligence_store
+        self._change_detector = change_detector
         self._running = False
 
     async def run(self) -> None:
@@ -324,6 +346,16 @@ class Worker:
                     extracted_price=plan_price,
                     product_config_id=config_id,
                     our_price=our_price,
+                )
+
+            # Extração de inteligência competitiva (após preços)
+            if message.intelligence_enabled:
+                await self._process_intelligence(
+                    screenshot_bytes=multi_result.screenshot_bytes,
+                    competitor_id=message.competitor_id,
+                    competitor_name=message.competitor_name,
+                    cycle_id=message.cycle_id,
+                    home_url=message.intelligence_home_url,
                 )
 
             # Acknowledge
@@ -660,6 +692,250 @@ class Worker:
                     "Falha ao renovar visibility: %s",
                     exc,
                 )
+
+    async def _process_intelligence(
+        self,
+        screenshot_bytes: bytes | None,
+        competitor_id: str,
+        competitor_name: str,
+        cycle_id: str,
+        home_url: str | None,
+    ) -> None:
+        """Processa extração de inteligência competitiva para um concorrente.
+
+        Reutiliza o screenshot já capturado para extração de preços,
+        sem realizar nova navegação ao site. Toda a lógica é envolvida
+        em try/except isolado — qualquer exceção é logada sem impactar
+        o fluxo de preços.
+
+        Se o screenshot não estiver disponível, registra um record com
+        status "failed" e razão "screenshot_unavailable".
+
+        Args:
+            screenshot_bytes: Screenshot full-page já capturado
+                (pode ser None).
+            competitor_id: ID do concorrente.
+            competitor_name: Nome do concorrente (para logging/extração).
+            cycle_id: ID do ciclo de monitoramento.
+            home_url: URL da home para extração de comunicação comercial.
+
+        Requirements: 4.1, 4.2, 4.3, 4.5, 10.1
+        """
+        try:
+            # Verificar se dependências de inteligência estão disponíveis
+            if (
+                self._intelligence_extractor is None
+                or self._intelligence_store is None
+            ):
+                logger.warning(
+                    "Inteligência habilitada mas extractor/store "
+                    "não configurados para competitor=%s",
+                    competitor_name,
+                )
+                return
+
+            # Se screenshot indisponível: registrar falha imediata
+            if not screenshot_bytes:
+                logger.warning(
+                    "Screenshot indisponível para extração de "
+                    "inteligência: competitor=%s, cycle_id=%s",
+                    competitor_name,
+                    cycle_id,
+                )
+                failed_record = CompetitorIntelligenceRecord(
+                    cycle_id=cycle_id,
+                    competitor_id=competitor_id,
+                    extraction_status="failed",
+                    failure_reason="screenshot_unavailable",
+                )
+                await self._intelligence_store.save_record(
+                    failed_record
+                )
+                return
+
+            # Chamar extrator de inteligência com screenshot existente
+            logger.info(
+                "Iniciando extração de inteligência: "
+                "competitor=%s, cycle_id=%s",
+                competitor_name,
+                cycle_id,
+            )
+
+            result = await self._intelligence_extractor.extract(
+                screenshot_bytes=screenshot_bytes,
+                competitor_name=competitor_name,
+                home_url=home_url,
+            )
+
+            # Criar record de inteligência a partir do resultado
+            record = CompetitorIntelligenceRecord(
+                cycle_id=cycle_id,
+                competitor_id=competitor_id,
+                extraction_status=result.status,
+                failure_reason=result.failure_reason,
+                extraction_latency_ms=result.latency_ms,
+                retry_count=result.retry_count,
+            )
+
+            # Preencher dados de comunicação comercial se disponível
+            if result.commercial_communication is not None:
+                comm = result.commercial_communication
+                if comm.keywords_status == "identified":
+                    record.commercial_keywords = (
+                        comm.commercial_keywords
+                    )
+                if comm.banner_status == "identified":
+                    record.home_banner_description = (
+                        comm.home_banner_description
+                    )
+                record.commercial_positioning_summary = (
+                    comm.commercial_positioning_summary
+                    if comm.commercial_positioning_summary
+                    else None
+                )
+
+            # Criar PackageComposition entities a partir do resultado
+            for pkg_data in result.package_compositions:
+                streamings = pkg_data.bundled_streamings or []
+                pkg_entity = PackageComposition(
+                    plan_name=pkg_data.plan_name,
+                    default_price=pkg_data.default_price,
+                    promotional_price=pkg_data.promotional_price,
+                    promotional_period_months=(
+                        pkg_data.promotional_period_months
+                    ),
+                    linear_channels=pkg_data.linear_channels,
+                    simultaneous_screens=(
+                        pkg_data.simultaneous_screens
+                    ),
+                    has_fiber=pkg_data.has_fiber,
+                    fiber_speed_mbps=pkg_data.fiber_speed_mbps,
+                    has_mobile_internet=(
+                        pkg_data.has_mobile_internet
+                    ),
+                    mobile_speed_mbps=pkg_data.mobile_speed_mbps,
+                    bundled_streaming_1=(
+                        streamings[0] if len(streamings) > 0
+                        else None
+                    ),
+                    bundled_streaming_2=(
+                        streamings[1] if len(streamings) > 1
+                        else None
+                    ),
+                    bundled_streaming_3=(
+                        streamings[2] if len(streamings) > 2
+                        else None
+                    ),
+                )
+                record.packages.append(pkg_entity)
+
+            # Persistir via IntelligenceStore
+            await self._intelligence_store.save_record(record)
+
+            logger.info(
+                "Inteligência extraída e persistida: "
+                "competitor=%s, status=%s, pacotes=%d, "
+                "latência=%.0fms",
+                competitor_name,
+                result.status,
+                len(result.package_compositions),
+                result.latency_ms,
+            )
+
+            # Detectar mudanças se extração não falhou
+            if result.status != "failed":
+                await self._detect_and_notify_changes(
+                    record=record,
+                    competitor_id=competitor_id,
+                    competitor_name=competitor_name,
+                )
+
+        except Exception as exc:
+            # Isolamento total: qualquer exceção é logada
+            # sem propagar para o fluxo de preços
+            logger.error(
+                "Falha na extração de inteligência "
+                "(isolada, sem impacto em preços): "
+                "competitor=%s, cycle_id=%s, erro=%s",
+                competitor_name,
+                cycle_id,
+                exc,
+                exc_info=True,
+            )
+
+    async def _detect_and_notify_changes(
+        self,
+        record: CompetitorIntelligenceRecord,
+        competitor_id: str,
+        competitor_name: str,
+    ) -> None:
+        """Detecta mudanças em inteligência e envia alertas por email.
+
+        Chama o ChangeDetector para comparar o registro atual com
+        o anterior e, para cada alerta gerado, envia notificação
+        via EmailNotifier. Falhas não interrompem o fluxo.
+
+        Args:
+            record: Registro de inteligência recém-persistido.
+            competitor_id: ID do concorrente.
+            competitor_name: Nome do concorrente para os alertas.
+        """
+        try:
+            if self._change_detector is None:
+                return
+
+            alerts = await self._change_detector.detect_changes(
+                current=record,
+                competitor_id=competitor_id,
+            )
+
+            if not alerts:
+                return
+
+            # Preencher competitor_name nos alertas se não preenchido
+            for alert in alerts:
+                if not alert.competitor_name:
+                    alert.competitor_name = competitor_name
+
+            # Enviar notificação por email para cada alerta
+            if self._email_notifier is not None:
+                recipients = settings.recipients_list
+                for alert in alerts:
+                    try:
+                        await (
+                            self._email_notifier
+                            .send_intelligence_alert(
+                                alert=alert,
+                                recipients=recipients,
+                            )
+                        )
+                    except Exception as notify_exc:
+                        logger.error(
+                            "Falha ao enviar alerta de "
+                            "inteligência: tipo=%s, "
+                            "competitor=%s, erro=%s",
+                            alert.alert_type,
+                            competitor_name,
+                            notify_exc,
+                            exc_info=True,
+                        )
+
+            logger.info(
+                "Detecção de mudanças concluída: "
+                "competitor=%s, %d alertas enviados",
+                competitor_name,
+                len(alerts),
+            )
+
+        except Exception as exc:
+            # Isolamento: erros na detecção não impactam nada
+            logger.error(
+                "Falha na detecção de mudanças "
+                "(isolada): competitor=%s, erro=%s",
+                competitor_name,
+                exc,
+                exc_info=True,
+            )
 
     async def _evaluate_alerts(
         self,
