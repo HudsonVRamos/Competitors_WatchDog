@@ -162,6 +162,9 @@ class PriceScraper:
             # 3. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
 
+            # 3.5 Expandir accordions/FAQs para revelar conteúdo oculto
+            await self._expand_accordions(page)
+
             # 4. Voltar ao topo e capturar full_page screenshot
             await page.evaluate("window.scrollTo(0, 0)")
             await page.wait_for_timeout(10000)  # 10s para garantir renderização completa (Vivo TV)
@@ -357,6 +360,9 @@ class PriceScraper:
 
             # 3. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
+
+            # 3.5 Expandir accordions/FAQs para revelar conteúdo oculto
+            await self._expand_accordions(page)
 
             # 4. Voltar ao topo
             await page.evaluate("window.scrollTo(0, 0)")
@@ -749,6 +755,92 @@ class PriceScraper:
             "Scroll concluído: altura final %dpx",
             await page.evaluate("document.body.scrollHeight"),
         )
+
+    async def _expand_accordions(self, page: Page) -> None:
+        """Expande todos os accordions/FAQs da página.
+
+        Clica em elementos colapsáveis (details, accordions, FAQs)
+        para revelar conteúdo oculto que pode conter preços ou
+        informações de pacotes. Funciona genericamente para:
+        - HTML5 <details>/<summary> (Apple TV+, etc.)
+        - Accordions com aria-expanded="false"
+        - Elementos com classe accordion/collapse/faq
+
+        Args:
+            page: Página Playwright já carregada e scrollada.
+        """
+        try:
+            # Estratégia 1: Abrir todos os <details> nativos do HTML5
+            opened = await page.evaluate("""
+                () => {
+                    let count = 0;
+                    document.querySelectorAll('details:not([open])').forEach(el => {
+                        el.setAttribute('open', '');
+                        count++;
+                    });
+                    return count;
+                }
+            """)
+            if opened > 0:
+                logger.info(
+                    "Accordions: %d <details> expandidos", opened
+                )
+
+            # Estratégia 2: Clicar em elementos com aria-expanded="false"
+            aria_buttons = await page.query_selector_all(
+                "[aria-expanded='false']"
+            )
+            aria_count = 0
+            for btn in aria_buttons[:20]:  # Limitar a 20 para não travar
+                try:
+                    await btn.click()
+                    aria_count += 1
+                    await page.wait_for_timeout(300)
+                except Exception:
+                    pass
+            if aria_count > 0:
+                logger.info(
+                    "Accordions: %d aria-expanded clicados",
+                    aria_count,
+                )
+
+            # Estratégia 3: Clicar em elementos com classe
+            # accordion/collapse/faq que estejam fechados
+            faq_triggers = await page.query_selector_all(
+                "[class*='accordion']:not([class*='open']):not([class*='active']) > "
+                "[class*='header'], "
+                "[class*='accordion']:not([class*='open']):not([class*='active']) > "
+                "[class*='title'], "
+                "[class*='faq'] [class*='question'], "
+                "[class*='collapse-trigger'], "
+                "button[class*='accordion']"
+            )
+            faq_count = 0
+            for trigger in faq_triggers[:15]:
+                try:
+                    await trigger.click()
+                    faq_count += 1
+                    await page.wait_for_timeout(300)
+                except Exception:
+                    pass
+            if faq_count > 0:
+                logger.info(
+                    "Accordions: %d FAQ triggers clicados",
+                    faq_count,
+                )
+
+            # Aguardar animações e conteúdo renderizar
+            if opened > 0 or aria_count > 0 or faq_count > 0:
+                await page.wait_for_timeout(1500)
+                logger.info(
+                    "Accordions expandidos: total %d elementos",
+                    opened + aria_count + faq_count,
+                )
+
+        except Exception as e:
+            logger.warning(
+                "Falha ao expandir accordions (não-crítico): %s", e
+            )
 
     def _resize_for_bedrock(self, image_bytes: bytes) -> bytes:
         """Resize screenshot para limites do Bedrock.
