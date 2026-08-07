@@ -155,6 +155,10 @@ class PriceScraper:
             if "vivo.com.br" in message.page_url:
                 await self._fill_vivo_cep(page)
 
+            # Se é site do Giga+ Fibra, selecionar cidade São Paulo
+            if "gigamaisfibra.com.br" in message.page_url:
+                await self._fill_giga_location(page)
+
             # 3. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
 
@@ -347,6 +351,10 @@ class PriceScraper:
             if "vivo.com.br" in message.page_url:
                 await self._fill_vivo_cep(page)
 
+            # Se é site do Giga+ Fibra, selecionar cidade São Paulo
+            if "gigamaisfibra.com.br" in message.page_url:
+                await self._fill_giga_location(page)
+
             # 3. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
 
@@ -465,6 +473,162 @@ class PriceScraper:
         except Exception as e:
             logger.warning(
                 "Vivo TV: falha ao setar localização: %s", e
+            )
+
+    async def _fill_giga_location(self, page: Page) -> None:
+        """Seleciona São Paulo no popup de localização do Giga+ Fibra.
+
+        O site exibe um modal "Onde você está?" com um dropdown
+        de cidades. Interage com o popup para selecionar São Paulo
+        e confirmar, permitindo que os preços regionais apareçam.
+
+        Args:
+            page: Página Playwright já navegada.
+        """
+        try:
+            logger.info(
+                "Giga+ Fibra: verificando popup de localização..."
+            )
+
+            # Aguardar popup aparecer (até 8s)
+            popup_visible = False
+            try:
+                await page.wait_for_selector(
+                    "text='Onde você está'",
+                    timeout=8000,
+                )
+                popup_visible = True
+            except Exception:
+                # Popup pode não aparecer (cookie já setado)
+                logger.info(
+                    "Giga+ Fibra: popup de localização não apareceu, "
+                    "continuando normalmente."
+                )
+
+            if not popup_visible:
+                return
+
+            logger.info(
+                "Giga+ Fibra: popup detectado, selecionando São Paulo..."
+            )
+
+            # Tentar interagir com o select/dropdown de cidade
+            # Estratégia 1: select element nativo
+            select_found = False
+            try:
+                select_el = await page.wait_for_selector(
+                    "select", timeout=3000
+                )
+                if select_el:
+                    # Tentar selecionar "São Paulo" por label ou value
+                    await page.select_option(
+                        "select",
+                        label="São Paulo",
+                    )
+                    select_found = True
+                    logger.info(
+                        "Giga+ Fibra: São Paulo selecionado via <select>"
+                    )
+            except Exception:
+                pass
+
+            # Estratégia 2: input com autocomplete/typeahead
+            if not select_found:
+                try:
+                    input_el = await page.query_selector(
+                        "input[placeholder*='cidade'], "
+                        "input[placeholder*='Selecione'], "
+                        "input[type='text']"
+                    )
+                    if input_el:
+                        await input_el.click()
+                        await input_el.fill("São Paulo")
+                        await page.wait_for_timeout(1500)
+                        # Clicar na opção que aparecer no dropdown
+                        try:
+                            await page.click(
+                                "text='São Paulo'",
+                                timeout=3000,
+                            )
+                            select_found = True
+                            logger.info(
+                                "Giga+ Fibra: São Paulo selecionado "
+                                "via input typeahead"
+                            )
+                        except Exception:
+                            # Tentar clicar no primeiro item da lista
+                            await page.click(
+                                "li >> text='São Paulo'",
+                                timeout=2000,
+                            )
+                            select_found = True
+                except Exception:
+                    pass
+
+            # Estratégia 3: clicar no dropdown customizado e buscar opção
+            if not select_found:
+                try:
+                    # Clicar em qualquer elemento que pareça dropdown
+                    dropdown_trigger = await page.query_selector(
+                        "[class*='select'], [class*='dropdown'], "
+                        "[role='combobox'], [role='listbox']"
+                    )
+                    if dropdown_trigger:
+                        await dropdown_trigger.click()
+                        await page.wait_for_timeout(1000)
+                        # Digitar para filtrar
+                        await page.keyboard.type("São Paulo")
+                        await page.wait_for_timeout(1000)
+                        # Clicar na opção
+                        await page.click(
+                            "text='São Paulo'", timeout=3000
+                        )
+                        select_found = True
+                        logger.info(
+                            "Giga+ Fibra: São Paulo selecionado "
+                            "via dropdown customizado"
+                        )
+                except Exception:
+                    pass
+
+            # Clicar no botão OK/Confirmar para fechar o popup
+            try:
+                ok_button = await page.query_selector(
+                    "button:text('OK'), button:text('Ok'), "
+                    "button:text('Confirmar'), "
+                    "button[type='submit']"
+                )
+                if ok_button:
+                    await ok_button.click()
+                    logger.info("Giga+ Fibra: botão OK clicado")
+                else:
+                    # Tentar qualquer botão dentro do modal
+                    await page.click(
+                        "button:has-text('OK')", timeout=3000
+                    )
+            except Exception:
+                logger.warning(
+                    "Giga+ Fibra: não encontrou botão de confirmação"
+                )
+
+            # Aguardar página recarregar com conteúdo regional
+            await page.wait_for_timeout(3000)
+            try:
+                await page.wait_for_load_state(
+                    "networkidle", timeout=10000
+                )
+            except Exception:
+                pass
+
+            logger.info(
+                "Giga+ Fibra: localização São Paulo configurada"
+            )
+
+        except Exception as e:
+            logger.warning(
+                "Giga+ Fibra: falha ao interagir com popup de "
+                "localização: %s",
+                e,
             )
 
     async def _scroll_page(self, page: Page) -> None:
