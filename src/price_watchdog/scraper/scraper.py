@@ -479,8 +479,9 @@ class PriceScraper:
         """Seleciona São Paulo no popup de localização do Giga+ Fibra.
 
         O site exibe um modal "Onde você está?" com um dropdown
-        de cidades. Interage com o popup para selecionar São Paulo
-        e confirmar, permitindo que os preços regionais apareçam.
+        de cidades. Interage com o popup para selecionar São Paulo.
+        Se São Paulo não estiver disponível, seleciona a primeira
+        opção disponível no dropdown.
 
         Args:
             page: Página Playwright já navegada.
@@ -509,7 +510,7 @@ class PriceScraper:
                 return
 
             logger.info(
-                "Giga+ Fibra: popup detectado, selecionando São Paulo..."
+                "Giga+ Fibra: popup detectado, selecionando cidade..."
             )
 
             # Tentar interagir com o select/dropdown de cidade
@@ -520,15 +521,50 @@ class PriceScraper:
                     "select", timeout=3000
                 )
                 if select_el:
-                    # Tentar selecionar "São Paulo" por label ou value
-                    await page.select_option(
-                        "select",
-                        label="São Paulo",
-                    )
-                    select_found = True
-                    logger.info(
-                        "Giga+ Fibra: São Paulo selecionado via <select>"
-                    )
+                    # Tentar selecionar "São Paulo" por label
+                    try:
+                        await page.select_option(
+                            "select",
+                            label="São Paulo",
+                        )
+                        select_found = True
+                        logger.info(
+                            "Giga+ Fibra: São Paulo selecionado "
+                            "via <select>"
+                        )
+                    except Exception:
+                        # São Paulo não disponível, selecionar
+                        # primeira opção não-vazia
+                        logger.info(
+                            "Giga+ Fibra: São Paulo não disponível"
+                            ", selecionando primeira opção..."
+                        )
+                        first_option = await page.evaluate("""
+                            () => {
+                                const sel = document.querySelector(
+                                    'select'
+                                );
+                                if (!sel) return null;
+                                for (let i = 0; i < sel.options.length; i++) {
+                                    const opt = sel.options[i];
+                                    if (opt.value && opt.value !== ''
+                                        && !opt.disabled) {
+                                        return opt.value;
+                                    }
+                                }
+                                return null;
+                            }
+                        """)
+                        if first_option:
+                            await page.select_option(
+                                "select", value=first_option
+                            )
+                            select_found = True
+                            logger.info(
+                                "Giga+ Fibra: primeira opção "
+                                "selecionada: %s",
+                                first_option,
+                            )
             except Exception:
                 pass
 
@@ -544,7 +580,8 @@ class PriceScraper:
                         await input_el.click()
                         await input_el.fill("São Paulo")
                         await page.wait_for_timeout(1500)
-                        # Clicar na opção que aparecer no dropdown
+
+                        # Tentar clicar em "São Paulo"
                         try:
                             await page.click(
                                 "text='São Paulo'",
@@ -556,19 +593,35 @@ class PriceScraper:
                                 "via input typeahead"
                             )
                         except Exception:
-                            # Tentar clicar no primeiro item da lista
-                            await page.click(
-                                "li >> text='São Paulo'",
-                                timeout=2000,
+                            # Fallback: limpar e clicar na primeira
+                            # opção da lista
+                            logger.info(
+                                "Giga+ Fibra: São Paulo não encontrado"
+                                ", selecionando primeira opção..."
                             )
-                            select_found = True
+                            await input_el.fill("")
+                            await input_el.click()
+                            await page.wait_for_timeout(1500)
+                            try:
+                                first_item = await page.query_selector(
+                                    "li:not([aria-disabled='true']), "
+                                    "[role='option']:not([aria-disabled])"
+                                )
+                                if first_item:
+                                    await first_item.click()
+                                    select_found = True
+                                    logger.info(
+                                        "Giga+ Fibra: primeira opção "
+                                        "selecionada via typeahead"
+                                    )
+                            except Exception:
+                                pass
                 except Exception:
                     pass
 
-            # Estratégia 3: clicar no dropdown customizado e buscar opção
+            # Estratégia 3: dropdown customizado
             if not select_found:
                 try:
-                    # Clicar em qualquer elemento que pareça dropdown
                     dropdown_trigger = await page.query_selector(
                         "[class*='select'], [class*='dropdown'], "
                         "[role='combobox'], [role='listbox']"
@@ -576,20 +629,41 @@ class PriceScraper:
                     if dropdown_trigger:
                         await dropdown_trigger.click()
                         await page.wait_for_timeout(1000)
-                        # Digitar para filtrar
-                        await page.keyboard.type("São Paulo")
-                        await page.wait_for_timeout(1000)
-                        # Clicar na opção
-                        await page.click(
-                            "text='São Paulo'", timeout=3000
-                        )
-                        select_found = True
-                        logger.info(
-                            "Giga+ Fibra: São Paulo selecionado "
-                            "via dropdown customizado"
-                        )
+
+                        # Tentar São Paulo primeiro
+                        try:
+                            await page.click(
+                                "text='São Paulo'", timeout=2000
+                            )
+                            select_found = True
+                            logger.info(
+                                "Giga+ Fibra: São Paulo selecionado "
+                                "via dropdown customizado"
+                            )
+                        except Exception:
+                            # Fallback: primeira opção visível
+                            try:
+                                first_opt = await page.query_selector(
+                                    "[role='option'], li, "
+                                    ".dropdown-item, "
+                                    "[class*='option']"
+                                )
+                                if first_opt:
+                                    await first_opt.click()
+                                    select_found = True
+                                    logger.info(
+                                        "Giga+ Fibra: primeira opção "
+                                        "selecionada via dropdown"
+                                    )
+                            except Exception:
+                                pass
                 except Exception:
                     pass
+
+            if not select_found:
+                logger.warning(
+                    "Giga+ Fibra: não conseguiu selecionar cidade"
+                )
 
             # Clicar no botão OK/Confirmar para fechar o popup
             try:
@@ -602,7 +676,6 @@ class PriceScraper:
                     await ok_button.click()
                     logger.info("Giga+ Fibra: botão OK clicado")
                 else:
-                    # Tentar qualquer botão dentro do modal
                     await page.click(
                         "button:has-text('OK')", timeout=3000
                     )
