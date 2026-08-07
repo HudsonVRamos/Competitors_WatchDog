@@ -766,11 +766,15 @@ class PriceScraper:
         - Accordions com aria-expanded="false"
         - Elementos com classe accordion/collapse/faq
 
+        Usa timeouts curtos para evitar travamento em botões
+        que acionam navegação ou modais pesados.
+
         Args:
             page: Página Playwright já carregada e scrollada.
         """
         try:
             # Estratégia 1: Abrir todos os <details> nativos do HTML5
+            # (rápido, sem side-effects — apenas seta atributo)
             opened = await page.evaluate("""
                 () => {
                     let count = 0;
@@ -786,41 +790,45 @@ class PriceScraper:
                     "Accordions: %d <details> expandidos", opened
                 )
 
-            # Estratégia 2: Clicar em elementos com aria-expanded="false"
+            # Estratégia 2: Clicar em aria-expanded="false"
+            # APENAS em elementos que parecem FAQ/accordion
+            # (evita botões de navegação, "Saiba mais", etc.)
             aria_buttons = await page.query_selector_all(
-                "[aria-expanded='false']"
+                "[aria-expanded='false'][class*='accord'], "
+                "[aria-expanded='false'][class*='faq'], "
+                "[aria-expanded='false'][class*='question'], "
+                "[aria-expanded='false'][class*='collapse'], "
+                "[aria-expanded='false'][role='button']"
+                "[aria-controls]"
             )
             aria_count = 0
-            for btn in aria_buttons[:20]:  # Limitar a 20 para não travar
+            for btn in aria_buttons[:10]:  # Max 10
                 try:
-                    await btn.click()
+                    # Timeout curto: 2s por click
+                    await btn.click(timeout=2000)
                     aria_count += 1
-                    await page.wait_for_timeout(300)
+                    await page.wait_for_timeout(200)
                 except Exception:
-                    pass
+                    pass  # Skip se travar
             if aria_count > 0:
                 logger.info(
                     "Accordions: %d aria-expanded clicados",
                     aria_count,
                 )
 
-            # Estratégia 3: Clicar em elementos com classe
-            # accordion/collapse/faq que estejam fechados
+            # Estratégia 3: Clicar em headers de FAQ
             faq_triggers = await page.query_selector_all(
-                "[class*='accordion']:not([class*='open']):not([class*='active']) > "
-                "[class*='header'], "
-                "[class*='accordion']:not([class*='open']):not([class*='active']) > "
-                "[class*='title'], "
+                "[class*='accordion'] [class*='header'], "
+                "[class*='accordion'] [class*='title'], "
                 "[class*='faq'] [class*='question'], "
-                "[class*='collapse-trigger'], "
                 "button[class*='accordion']"
             )
             faq_count = 0
-            for trigger in faq_triggers[:15]:
+            for trigger in faq_triggers[:10]:
                 try:
-                    await trigger.click()
+                    await trigger.click(timeout=2000)
                     faq_count += 1
-                    await page.wait_for_timeout(300)
+                    await page.wait_for_timeout(200)
                 except Exception:
                     pass
             if faq_count > 0:
@@ -829,12 +837,13 @@ class PriceScraper:
                     faq_count,
                 )
 
-            # Aguardar animações e conteúdo renderizar
-            if opened > 0 or aria_count > 0 or faq_count > 0:
-                await page.wait_for_timeout(1500)
+            # Aguardar animações
+            total = opened + aria_count + faq_count
+            if total > 0:
+                await page.wait_for_timeout(1000)
                 logger.info(
                     "Accordions expandidos: total %d elementos",
-                    opened + aria_count + faq_count,
+                    total,
                 )
 
         except Exception as e:
