@@ -154,6 +154,7 @@ class PriceScraper:
             # Se é site da Vivo, inserir CEP para desbloquear preços
             if "vivo.com.br" in message.page_url:
                 await self._fill_vivo_cep(page)
+                await self._navigate_vivo_tabs(page)
 
             # Se é site do Giga+ Fibra, selecionar cidade São Paulo
             if "gigamaisfibra.com.br" in message.page_url:
@@ -353,6 +354,7 @@ class PriceScraper:
             # Se é site da Vivo, inserir CEP para desbloquear preços
             if "vivo.com.br" in message.page_url:
                 await self._fill_vivo_cep(page)
+                await self._navigate_vivo_tabs(page)
 
             # Se é site do Giga+ Fibra, selecionar cidade São Paulo
             if "gigamaisfibra.com.br" in message.page_url:
@@ -479,6 +481,99 @@ class PriceScraper:
         except Exception as e:
             logger.warning(
                 "Vivo TV: falha ao setar localização: %s", e
+            )
+
+    async def _navigate_vivo_tabs(self, page: Page) -> None:
+        """Navega pelas tabs de ofertas da Vivo para capturar todos os planos.
+
+        O site da Vivo tem 3 seções de ofertas em tabs:
+        - TV Online
+        - TV por Assinatura
+        - Vivo Fibra + TV
+
+        Clica em cada tab para forçar o carregamento do conteúdo,
+        garantindo que o screenshot final e a extração por IA
+        capturem informações de todas as categorias.
+
+        Args:
+            page: Página Playwright já com localização SP definida.
+        """
+        try:
+            logger.info("Vivo TV: navegando pelas tabs de ofertas...")
+
+            # Esperar as tabs carregarem (demora uns segundos)
+            await page.wait_for_timeout(5000)
+
+            # Buscar tabs/botões de navegação de ofertas
+            tab_texts = [
+                "TV Online",
+                "TV por Assinatura",
+                "Vivo Fibra + TV",
+                "Fibra + TV",
+                "TV + Fibra",
+            ]
+
+            tabs_clicked = 0
+            for tab_text in tab_texts:
+                try:
+                    # Tentar clicar na tab pelo texto
+                    tab = await page.query_selector(
+                        f"text='{tab_text}'"
+                    )
+                    if tab:
+                        await tab.click(timeout=3000)
+                        tabs_clicked += 1
+                        # Esperar conteúdo carregar
+                        await page.wait_for_timeout(3000)
+                        try:
+                            await page.wait_for_load_state(
+                                "networkidle", timeout=8000
+                            )
+                        except Exception:
+                            pass
+                        logger.info(
+                            "Vivo TV: tab '%s' clicada",
+                            tab_text,
+                        )
+                except Exception:
+                    pass
+
+            # Se não encontrou tabs por texto, tentar seletores genéricos
+            if tabs_clicked == 0:
+                try:
+                    tabs = await page.query_selector_all(
+                        "[role='tab'], "
+                        "[class*='tab-item'], "
+                        "[class*='tab-link'], "
+                        "nav [class*='item']"
+                    )
+                    for tab in tabs[:5]:
+                        try:
+                            await tab.click(timeout=2000)
+                            tabs_clicked += 1
+                            await page.wait_for_timeout(2000)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            if tabs_clicked > 0:
+                logger.info(
+                    "Vivo TV: %d tabs de ofertas navegadas",
+                    tabs_clicked,
+                )
+            else:
+                logger.info(
+                    "Vivo TV: nenhuma tab de ofertas encontrada"
+                )
+
+            # Voltar para a primeira tab para screenshot completo
+            # (ou deixar na última que foi clicada)
+            await page.wait_for_timeout(2000)
+
+        except Exception as e:
+            logger.warning(
+                "Vivo TV: falha ao navegar tabs: %s", e
             )
 
     async def _fill_giga_location(self, page: Page) -> None:
