@@ -314,8 +314,11 @@ class AIExtractor(BaseExtractor):
     ) -> MultiPriceExtractionResult:
         """Extrai TODOS os planos e preços visíveis na página.
 
-        Captura screenshot full-page e pede ao Claude para listar
-        todos os planos/preços encontrados na página do concorrente.
+        Captura screenshot full-page e texto da página, e pede ao
+        Claude para listar todos os planos/preços encontrados.
+        O texto da página é incluído como contexto adicional para
+        casos onde os preços não são visíveis no screenshot (ex:
+        preços carregados dinamicamente, texto pequeno, etc.).
 
         Args:
             page: Página Playwright já navegada e scrollada.
@@ -339,9 +342,18 @@ class AIExtractor(BaseExtractor):
                 screenshot_bytes
             )
 
-            # Chamar Bedrock com prompt multi-plano
+            # Capturar texto da página como contexto adicional
+            try:
+                page_text = await page.inner_text("body")
+                # Truncar a 8000 chars para não exceder token limit
+                if len(page_text) > 8000:
+                    page_text = page_text[:8000]
+            except Exception:
+                page_text = ""
+
+            # Chamar Bedrock com prompt multi-plano + texto
             result = await self._invoke_bedrock_all_with_retry(
-                screenshot_bytes, competitor_name
+                screenshot_bytes, competitor_name, page_text
             )
             result.screenshot_bytes = screenshot_bytes
 
@@ -368,19 +380,21 @@ class AIExtractor(BaseExtractor):
         self,
         screenshot_bytes: bytes,
         competitor_name: str,
+        page_text: str = "",
     ) -> MultiPriceExtractionResult:
         """Invoca Bedrock para extração multi-plano com retry.
 
         Args:
             screenshot_bytes: Bytes do screenshot capturado.
             competitor_name: Nome do concorrente.
+            page_text: Texto extraído da página (contexto adicional).
 
         Returns:
             MultiPriceExtractionResult com planos encontrados.
         """
         try:
             response = await self._call_bedrock_all(
-                screenshot_bytes, competitor_name
+                screenshot_bytes, competitor_name, page_text
             )
             return response
         except Exception as e:
@@ -396,12 +410,14 @@ class AIExtractor(BaseExtractor):
         self,
         screenshot_bytes: bytes,
         competitor_name: str,
+        page_text: str = "",
     ) -> MultiPriceExtractionResult:
         """Chama Bedrock pedindo TODOS os planos/preços da página.
 
         Args:
             screenshot_bytes: Bytes do screenshot.
             competitor_name: Nome do concorrente.
+            page_text: Texto extraído da página (contexto adicional).
 
         Returns:
             MultiPriceExtractionResult parseado da resposta.
@@ -423,6 +439,15 @@ class AIExtractor(BaseExtractor):
             "\n\nSe não encontrar nenhum plano/preço, retorne: "
             '{"plans": []}'
         )
+
+        # Incluir texto da página como contexto adicional
+        if page_text:
+            prompt += (
+                "\n\n--- TEXTO EXTRAÍDO DA PÁGINA (contexto "
+                "adicional caso os preços não sejam visíveis no "
+                "screenshot) ---\n"
+                f"{page_text}"
+            )
 
         request_body = {
             "anthropic_version": "bedrock-2023-05-31",
