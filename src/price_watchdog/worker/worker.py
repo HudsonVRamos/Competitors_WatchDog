@@ -554,7 +554,16 @@ class Worker:
             price_difference_pct: float | None = None
             screenshot_s3_key: str | None = None
 
-            if scrape_result.extraction_status == "success":
+            # Determinar extraction_status baseado no health check
+            # Se score é GEO_MISMATCH ou GEO_REDIRECT, forçar "skipped"
+            extraction_status = scrape_result.extraction_status
+            if scrape_result.health_check_score in (
+                "GEO_MISMATCH",
+                "GEO_REDIRECT",
+            ):
+                extraction_status = "skipped"
+
+            if extraction_status == "success":
                 extracted_price = scrape_result.extracted_price
 
                 # Comparar preços
@@ -584,7 +593,7 @@ class Worker:
                     )
                 )
 
-            # Criar e persistir PriceRecord
+            # Criar e persistir PriceRecord com health check fields
             record = PriceRecord(
                 product_config_id=message.product_config_id,
                 competitor_id=message.competitor_id,
@@ -593,11 +602,20 @@ class Worker:
                 our_price=message.our_price,
                 price_difference=price_difference,
                 price_difference_pct=price_difference_pct,
-                extraction_status=scrape_result.extraction_status,
+                extraction_status=extraction_status,
                 failure_reason=scrape_result.failure_reason,
                 screenshot_s3_key=(
                     screenshot_s3_key
                     or scrape_result.screenshot_s3_key
+                ),
+                health_check_score=(
+                    scrape_result.health_check_score
+                ),
+                health_check_reason=(
+                    scrape_result.health_check_reason
+                ),
+                diagnostic_s3_key=(
+                    scrape_result.diagnostic_s3_key
                 ),
             )
 
@@ -605,10 +623,11 @@ class Worker:
 
             logger.info(
                 "PriceRecord persistido: product_config_id=%s, "
-                "status=%s, preço=%s",
+                "status=%s, preço=%s, health_check=%s",
                 message.product_config_id,
-                scrape_result.extraction_status,
+                extraction_status,
                 extracted_price,
+                scrape_result.health_check_score,
             )
 
             # Acknowledge — mensagem processada com sucesso

@@ -87,6 +87,9 @@ class PriceRecord(Base):
     extraction_status = Column(String(20), nullable=False)
     failure_reason = Column(Text, nullable=True)
     screenshot_s3_key = Column(String(512), nullable=True)
+    health_check_score = Column(String(20), nullable=True)
+    health_check_reason = Column(Text, nullable=True)
+    diagnostic_s3_key = Column(String(512), nullable=True)
     extracted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     product_config = relationship("ProductConfig", back_populates="price_records")

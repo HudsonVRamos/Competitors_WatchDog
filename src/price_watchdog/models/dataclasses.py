@@ -15,18 +15,28 @@ class ScrapeResult:
     """Resultado completo de uma operação de scraping.
 
     Attributes:
-        extraction_status: Status da extração ("success", "failed", "not_found")
-        extracted_price: Preço extraído (None se falhou)
+        extraction_status: Status da extração ("success", "failed",
+            "not_found", "skipped")
+        extracted_price: Preço extraído (None se falhou ou skipped)
         failure_reason: Razão da falha (None se sucesso)
         screenshot_bytes: Bytes do screenshot capturado
         screenshot_s3_key: Chave S3 após upload do screenshot
+        health_check_score: Score de saúde da execução (SUCCESS,
+            GEO_MISMATCH, GEO_REDIRECT, SCRAPER_ERROR, NETWORK_ERROR)
+        health_check_reason: Razão descritiva do score (obrigatória
+            quando score é GEO_MISMATCH ou GEO_REDIRECT)
+        diagnostic_s3_key: Chave S3 do artefato diagnóstico capturado
+            em caso de erro ou geo issue
     """
 
-    extraction_status: str  # "success" | "failed" | "not_found"
+    extraction_status: str  # "success" | "failed" | "not_found" | "skipped"
     extracted_price: float | None = None
     failure_reason: str | None = None
     screenshot_bytes: bytes | None = None
     screenshot_s3_key: str | None = None
+    health_check_score: str | None = None
+    health_check_reason: str | None = None
+    diagnostic_s3_key: str | None = None
 
 
 @dataclass

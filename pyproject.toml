@@ -41,4 +41,4 @@ markers = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/price_watchdog"]
+packages = ["src/price_watchdog", "src/scraping_resilience"]

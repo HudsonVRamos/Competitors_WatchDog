@@ -631,3 +631,271 @@ class TestWorkerAlertEvaluation:
             "price_store"
         ].get_previous_price.assert_not_called()
         worker_deps["alert_service"].evaluate.assert_not_called()
+
+
+class TestWorkerHealthCheckPersistence:
+    """Testes de persistência do Health Check Score no PriceRecord.
+
+    Valida Requirements 5.2 e 5.4:
+    - Health Check Score, reason e diagnostic_s3_key são persistidos
+    - Extração é "skipped" quando score é GEO_MISMATCH ou GEO_REDIRECT
+    """
+
+    @pytest.mark.asyncio
+    async def test_geo_mismatch_persiste_como_skipped(
+        self, worker, worker_deps, message
+    ):
+        """Quando score é GEO_MISMATCH, extraction_status deve ser 'skipped'
+        e campos de health check devem ser persistidos no PriceRecord."""
+        worker_deps["scraper"].scrape.return_value = ScrapeResult(
+            extraction_status="failed",
+            extracted_price=None,
+            failure_reason=None,
+            screenshot_bytes=b"geo-screenshot",
+            health_check_score="GEO_MISMATCH",
+            health_check_reason="idioma inglês detectado, moeda USD detectada",
+            diagnostic_s3_key="diagnostics/comp-456/cycle-789/diag.json",
+        )
+
+        worker_deps["screenshot_store"].upload.return_value = (
+            "screenshots/cycle-789/comp-456/geo.png"
+        )
+
+        await worker._process_message(message, "receipt-abc")
+
+        # Verificar persistência
+        worker_deps["price_store"].save_record.assert_called_once()
+        saved_record = (
+            worker_deps["price_store"].save_record.call_args[0][0]
+        )
+
+        # Status deve ser "skipped" (não "failed")
+        assert saved_record.extraction_status == "skipped"
+        # Preço não deve ser extraído
+        assert saved_record.extracted_price is None
+        # Campos de health check devem estar preenchidos
+        assert saved_record.health_check_score == "GEO_MISMATCH"
+        assert saved_record.health_check_reason == (
+            "idioma inglês detectado, moeda USD detectada"
+        )
+        assert saved_record.diagnostic_s3_key == (
+            "diagnostics/comp-456/cycle-789/diag.json"
+        )
+
+        # Não deve avaliar alertas (extração skipped)
+        worker_deps["alert_service"].evaluate.assert_not_called()
+
+        # Deve fazer acknowledge (processamento controlado)
+        worker_deps["consumer"].acknowledge.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_geo_redirect_persiste_como_skipped(
+        self, worker, worker_deps, message
+    ):
+        """Quando score é GEO_REDIRECT, extraction_status deve ser 'skipped'
+        e campos de health check devem ser persistidos no PriceRecord."""
+        worker_deps["scraper"].scrape.return_value = ScrapeResult(
+            extraction_status="failed",
+            extracted_price=None,
+            failure_reason=None,
+            screenshot_bytes=b"redirect-screenshot",
+            health_check_score="GEO_REDIRECT",
+            health_check_reason=(
+                "URL redirecionada para /us/gift-cards, "
+                "termos 'Gift Card', 'Walmart' detectados"
+            ),
+            diagnostic_s3_key="diagnostics/comp-456/cycle-789/redirect.json",
+        )
+
+        worker_deps["screenshot_store"].upload.return_value = (
+            "screenshots/cycle-789/comp-456/redirect.png"
+        )
+
+        await worker._process_message(message, "receipt-abc")
+
+        saved_record = (
+            worker_deps["price_store"].save_record.call_args[0][0]
+        )
+
+        # Status deve ser "skipped"
+        assert saved_record.extraction_status == "skipped"
+        assert saved_record.extracted_price is None
+        assert saved_record.health_check_score == "GEO_REDIRECT"
+        assert "URL redirecionada" in saved_record.health_check_reason
+        assert saved_record.diagnostic_s3_key == (
+            "diagnostics/comp-456/cycle-789/redirect.json"
+        )
+
+        # Não deve avaliar alertas
+        worker_deps["alert_service"].evaluate.assert_not_called()
+        # Deve fazer acknowledge
+        worker_deps["consumer"].acknowledge.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_success_persiste_health_check_score(
+        self, worker, worker_deps, message
+    ):
+        """Quando score é SUCCESS, health_check_score deve ser persistido
+        e extração deve prosseguir normalmente."""
+        worker_deps["scraper"].scrape.return_value = ScrapeResult(
+            extraction_status="success",
+            extracted_price=49.90,
+            screenshot_bytes=b"ok-screenshot",
+            health_check_score="SUCCESS",
+            health_check_reason=None,
+            diagnostic_s3_key=None,
+        )
+
+        comparison_mock = MagicMock()
+        comparison_mock.absolute_difference = -50.0
+        comparison_mock.percentage_difference = -50.05
+        worker_deps["comparator"].compare.return_value = (
+            comparison_mock
+        )
+
+        worker_deps["screenshot_store"].upload.return_value = (
+            "screenshots/cycle-789/comp-456/success.png"
+        )
+
+        await worker._process_message(message, "receipt-abc")
+
+        saved_record = (
+            worker_deps["price_store"].save_record.call_args[0][0]
+        )
+
+        # Status deve ser "success"
+        assert saved_record.extraction_status == "success"
+        assert saved_record.extracted_price == 49.90
+        # Health check score deve ser persistido
+        assert saved_record.health_check_score == "SUCCESS"
+        assert saved_record.health_check_reason is None
+        assert saved_record.diagnostic_s3_key is None
+
+        # Deve avaliar alertas (extração com sucesso)
+        worker_deps["comparator"].compare.assert_called_once_with(
+            49.90, 99.90
+        )
+
+    @pytest.mark.asyncio
+    async def test_network_error_nao_forca_skipped(
+        self, worker, worker_deps, message
+    ):
+        """NETWORK_ERROR não deve forçar 'skipped' — mantém status original."""
+        worker_deps["scraper"].scrape.return_value = ScrapeResult(
+            extraction_status="failed",
+            extracted_price=None,
+            failure_reason="Connection timeout after 30s",
+            screenshot_bytes=None,
+            health_check_score="NETWORK_ERROR",
+            health_check_reason=None,
+            diagnostic_s3_key=None,
+        )
+
+        await worker._process_message(message, "receipt-abc")
+
+        saved_record = (
+            worker_deps["price_store"].save_record.call_args[0][0]
+        )
+
+        # Status mantém "failed" (NETWORK_ERROR não força "skipped")
+        assert saved_record.extraction_status == "failed"
+        assert saved_record.health_check_score == "NETWORK_ERROR"
+        assert saved_record.failure_reason == (
+            "Connection timeout after 30s"
+        )
+
+    @pytest.mark.asyncio
+    async def test_scraper_error_nao_forca_skipped(
+        self, worker, worker_deps, message
+    ):
+        """SCRAPER_ERROR não deve forçar 'skipped' — mantém status original."""
+        worker_deps["scraper"].scrape.return_value = ScrapeResult(
+            extraction_status="failed",
+            extracted_price=None,
+            failure_reason="Elemento .price não encontrado",
+            screenshot_bytes=b"error-screenshot",
+            health_check_score="SCRAPER_ERROR",
+            health_check_reason=None,
+            diagnostic_s3_key="diagnostics/comp-456/cycle-789/scraper.json",
+        )
+
+        worker_deps["screenshot_store"].upload.return_value = (
+            "screenshots/error.png"
+        )
+
+        await worker._process_message(message, "receipt-abc")
+
+        saved_record = (
+            worker_deps["price_store"].save_record.call_args[0][0]
+        )
+
+        # Status mantém "failed" (SCRAPER_ERROR não força "skipped")
+        assert saved_record.extraction_status == "failed"
+        assert saved_record.health_check_score == "SCRAPER_ERROR"
+        assert saved_record.diagnostic_s3_key == (
+            "diagnostics/comp-456/cycle-789/scraper.json"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sem_health_check_score_campos_nulos(
+        self, worker, worker_deps, message
+    ):
+        """Quando scraper não retorna health check, campos ficam None."""
+        worker_deps["scraper"].scrape.return_value = ScrapeResult(
+            extraction_status="success",
+            extracted_price=120.0,
+            screenshot_bytes=None,
+        )
+
+        comparison_mock = MagicMock()
+        comparison_mock.absolute_difference = 20.10
+        comparison_mock.percentage_difference = 20.12
+        worker_deps["comparator"].compare.return_value = (
+            comparison_mock
+        )
+
+        await worker._process_message(message, "receipt-abc")
+
+        saved_record = (
+            worker_deps["price_store"].save_record.call_args[0][0]
+        )
+
+        assert saved_record.extraction_status == "success"
+        assert saved_record.health_check_score is None
+        assert saved_record.health_check_reason is None
+        assert saved_record.diagnostic_s3_key is None
+
+    @pytest.mark.asyncio
+    async def test_geo_mismatch_nao_extrai_preco_mesmo_se_disponivel(
+        self, worker, worker_deps, message
+    ):
+        """Mesmo se scraper reportar preço com GEO_MISMATCH,
+        o worker NÃO deve persistir o preço (proteção contra contaminação)."""
+        # Cenário: scraper extraiu um preço MAS detectou GEO_MISMATCH
+        worker_deps["scraper"].scrape.return_value = ScrapeResult(
+            extraction_status="success",
+            extracted_price=6.99,  # Preço em USD (incorreto!)
+            screenshot_bytes=b"geo-screenshot",
+            health_check_score="GEO_MISMATCH",
+            health_check_reason="moeda USD detectada ao invés de BRL",
+            diagnostic_s3_key=None,
+        )
+
+        worker_deps["screenshot_store"].upload.return_value = (
+            "screenshots/geo.png"
+        )
+
+        await worker._process_message(message, "receipt-abc")
+
+        saved_record = (
+            worker_deps["price_store"].save_record.call_args[0][0]
+        )
+
+        # Extração deve ser "skipped" — preço NÃO deve ser extraído
+        assert saved_record.extraction_status == "skipped"
+        # Preço deve ser None (não contaminar banco com valor em USD)
+        assert saved_record.extracted_price is None
+        assert saved_record.price_difference is None
+        assert saved_record.price_difference_pct is None
+        # Health check persistido
+        assert saved_record.health_check_score == "GEO_MISMATCH"

@@ -1,19 +1,24 @@
 """PriceScraper — coordena navegação, screenshot e extração de preços.
 
 Usa Playwright com Chromium headless para:
-1. Navegar até a URL com viewport 1920x720
-2. Scroll incremental para forçar lazy-loading (até 8000px)
-3. Voltar ao topo e capturar full_page screenshot
-4. Resize da imagem para limites do Bedrock (max 8000px, max 4.5MB)
-5. Executar estratégia de extração (regex ou AI)
+1. Injetar cookies de geolocalização (quando configurado)
+2. Navegar até a URL com retry automático
+3. Aguardar página pronta com waits inteligentes (sem sleeps fixos)
+4. Capturar screenshots em etapas críticas
+5. Validar conteúdo (idioma/moeda/região)
+6. Interagir com componentes customizados (se necessário)
+7. Scroll incremental para forçar lazy-loading (até 8000px)
+8. Capturar full_page screenshot e resize para Bedrock
+9. Executar estratégia de extração
+10. Calcular Health Check Score
 
-Requirements: 3.1, 3.4, 7.1
+Requirements: 1.1, 1.4, 2.1, 3.1, 3.4, 4.1, 5.1, 7.1, 11.2
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import time
 from io import BytesIO
 
 from playwright.async_api import async_playwright, Page
@@ -29,6 +34,25 @@ from price_watchdog.scraper.extractors import (
     CSSSelectorExtractor,
     RegexExtractor,
 )
+
+# Scraping Resilience modules
+from scraping_resilience.component_interactor import CustomComponentInteractor
+from scraping_resilience.content_validator import ContentValidator
+from scraping_resilience.cookie_injector import GeolocationCookieInjector
+from scraping_resilience.diagnostics_collector import DiagnosticsCollector
+from scraping_resilience.health_check_scorer import HealthCheckScorer
+from scraping_resilience.intelligent_wait import IntelligentWaitManager
+from scraping_resilience.retry_engine import RetryEngine
+from scraping_resilience.step_screenshotter import StepScreenshotter
+from scraping_resilience.structured_logger import (
+    ScrapeExecutionLog,
+    ScrapeSuccessLog,
+    StructuredLogger,
+)
+
+# Competitor-specific flows
+from scraping_resilience.competitor_flows.giga_fibra import GigaFibraFlow
+from scraping_resilience.competitor_flows.vivo_tv import VivoTVFlow
 
 logger = logging.getLogger(__name__)
 
@@ -46,28 +70,70 @@ _VIEWPORT_HEIGHT = 720
 _MAX_IMAGE_DIMENSION = 8000
 _MAX_IMAGE_SIZE_BYTES = 4_500_000
 
+# Seletores críticos por concorrente (para IntelligentWaitManager)
+_CRITICAL_SELECTORS: dict[str, list[str]] = {
+    "vivo": ["[class*='plan']", "[class*='card']", "[class*='offer']"],
+    "giga": ["[class*='card']", "[class*='plan']", "[class*='plano']"],
+    "netflix": ["[class*='plan']", "[class*='price']"],
+    "paramount": ["[class*='plan']", "[class*='price']"],
+}
+
+
+def _get_site_key(url: str) -> str | None:
+    """Retorna a chave do site com base na URL para lookup de configs."""
+    if "vivo.com.br" in url:
+        return "vivo"
+    if "gigamaisfibra.com.br" in url:
+        return "giga"
+    if "netflix.com" in url:
+        return "netflix"
+    if "paramountplus.com" in url:
+        return "paramount"
+    return None
+
 
 class PriceScraper:
-    """Navega páginas e coordena extração de preços.
+    """Navega páginas e coordena extração de preços com resiliência.
+
+    Integra módulos de scraping resilience:
+    - IntelligentWaitManager: esperas baseadas em condição
+    - RetryEngine: retry com backoff exponencial
+    - GeolocationCookieInjector: cookies de localização pré-navegação
+    - ContentValidator: validação de idioma/moeda/região
+    - CustomComponentInteractor: interação com componentes não-nativos
+    - StepScreenshotter: screenshots sequenciais
+    - DiagnosticsCollector: artefatos diagnósticos em erro
+    - HealthCheckScorer: classificação de saúde da execução
 
     Cria um browser novo para cada request (evita acúmulo de memória).
     Usa scroll incremental para carregar lazy content antes do screenshot.
     """
 
     def __init__(self) -> None:
-        """Inicializa o PriceScraper."""
-        pass
+        """Inicializa o PriceScraper com módulos de resiliência."""
+        self._wait_manager = IntelligentWaitManager()
+        self._retry_engine = RetryEngine()
+        self._cookie_injector = GeolocationCookieInjector()
+        self._content_validator = ContentValidator()
+        self._component_interactor = CustomComponentInteractor()
+        self._health_check_scorer = HealthCheckScorer()
+        self._structured_logger = StructuredLogger()
 
     async def scrape(self, message: PriceCheckMessage) -> ScrapeResult:
-        """Executa navegação, screenshot full-page e extração.
+        """Executa navegação resiliente, screenshot e extração.
 
-        Fluxo:
+        Fluxo refatorado (conforme diagrama de sequência do design):
         1. Abre browser com viewport 1920x720
-        2. Navega até URL (wait domcontentloaded, timeout 60s)
-        3. Scroll incremental para forçar lazy-loading
-        4. Volta ao topo e captura full_page=True
-        5. Resize se necessário (Bedrock limits)
-        6. Executa estratégia de extração
+        2. Injeta cookies de geolocalização (se configurado)
+        3. Navega até URL com retry automático
+        4. Aguarda página pronta com IntelligentWaitManager
+        5. Captura screenshot após carregamento
+        6. Valida conteúdo (idioma/moeda/região)
+        7. Interage com componentes se necessário (tabs, dropdowns)
+        8. Scroll incremental para lazy-loading
+        9. Captura screenshot antes de extração
+        10. Executa estratégia de extração
+        11. Calcula Health Check Score
 
         Args:
             message: Mensagem com dados do produto a ser scrapeado.
@@ -82,13 +148,22 @@ class PriceScraper:
             message.extraction_strategy,
         )
 
+        start_time = time.perf_counter()
         screenshot_bytes: bytes | None = None
         playwright_instance = None
         browser = None
         page: Page | None = None
+        network_error_occurred = False
+
+        # Instanciar screenshotter e diagnostics para esta execução
+        screenshotter = StepScreenshotter(
+            competitor_id=message.competitor_id,
+            cycle_id=message.cycle_id,
+        )
+        diagnostics = DiagnosticsCollector()
 
         try:
-            # 1. Abrir browser com viewport pequeno
+            # 1. Abrir browser com viewport
             playwright_instance = await async_playwright().start()
             browser = await playwright_instance.chromium.launch(
                 headless=True,
@@ -119,56 +194,137 @@ class PriceScraper:
             )
             page = await context.new_page()
 
-            # 2. Navegar até a URL
-            try:
-                response = await page.goto(
-                    message.page_url,
-                    timeout=_NAVIGATION_TIMEOUT_MS,
-                    wait_until="domcontentloaded",
+            # 2. Injetar cookies de geolocalização (ANTES da navegação)
+            site_config = self._get_site_config(message.page_url)
+            if site_config:
+                injection_result = await self._cookie_injector.inject_cookies(
+                    context, site_config
                 )
-                if response and response.status >= 400:
-                    logger.error(
-                        "HTTP %d para '%s'", response.status, message.page_url
-                    )
-                    return ScrapeResult(
-                        extraction_status="failed",
-                        failure_reason=f"HTTP {response.status}",
-                    )
-                logger.info("Página carregada: %s", message.page_url)
-            except Exception as nav_error:
+                logger.info(
+                    "Cookies injetados: %d cookie(s)",
+                    injection_result.cookies_count,
+                )
+
+            # 3. Navegar com retry automático
+            nav_result = await self._retry_engine.execute(
+                self._navigate_page, "navigation", page, message.page_url
+            )
+
+            if not nav_result.success:
+                # Classificar como network error se retry esgotou
+                network_error_occurred = True
+                failure_reason = (
+                    f"Navegação falhou após {nav_result.attempts} tentativas: "
+                    f"{nav_result.errors[-1] if nav_result.errors else 'erro desconhecido'}"
+                )
+                logger.error(failure_reason)
+
+                # Calcular health check score
+                score, reason, _ = self._health_check_scorer.score(
+                    validation_result=None,
+                    extraction_success=False,
+                    network_error=network_error_occurred,
+                )
+
+                return ScrapeResult(
+                    extraction_status="failed",
+                    failure_reason=failure_reason,
+                )
+
+            # Verificar status HTTP
+            response = nav_result.result
+            if response and response.status >= 400:
                 logger.error(
-                    "Erro de navegação para '%s': %s",
-                    message.page_url, nav_error,
+                    "HTTP %d para '%s'", response.status, message.page_url
                 )
                 return ScrapeResult(
                     extraction_status="failed",
-                    failure_reason=f"Erro de navegação: {str(nav_error)}",
+                    failure_reason=f"HTTP {response.status}",
                 )
 
-            # Esperar network idle antes do scroll
-            try:
-                await page.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:
-                pass  # Timeout OK
+            logger.info("Página carregada: %s", message.page_url)
 
-            # Se é site da Vivo, inserir CEP para desbloquear preços
+            # 4. Aguardar página pronta com waits inteligentes
+            site_key = _get_site_key(message.page_url)
+            critical_selectors = _CRITICAL_SELECTORS.get(site_key or "", None)
+            wait_result = await self._wait_manager.wait_for_page_ready(
+                page, critical_selectors=critical_selectors
+            )
+            logger.info(
+                "Página pronta: estratégia='%s', tempo=%dms",
+                wait_result.strategy_used,
+                wait_result.elapsed_ms,
+            )
+
+            # 5. Screenshot após carregamento inicial
+            await screenshotter.capture(page, "after_load")
+
+            # 6. Validar conteúdo (idioma/moeda/região) para sites com risco geo
+            validation_result = None
+            if site_key in ("netflix", "paramount"):
+                expected_url_pattern = "/br/" if site_key == "paramount" else None
+                validation_result = await self._content_validator.validate(
+                    page,
+                    expected_language="pt",
+                    expected_currency="BRL",
+                    expected_url_pattern=expected_url_pattern,
+                )
+
+                # Se GEO_MISMATCH ou GEO_REDIRECT, skip extração
+                if not validation_result.is_valid:
+                    score, reason, extraction_skipped = self._health_check_scorer.score(
+                        validation_result=validation_result,
+                        extraction_success=False,
+                        network_error=False,
+                    )
+
+                    # Capturar diagnóstico
+                    await diagnostics.capture_diagnostic(
+                        page,
+                        reason or "geo_validation_failed",
+                        message.competitor_id,
+                        message.cycle_id,
+                    )
+                    await screenshotter.capture(page, "geo_validation_failed")
+
+                    logger.warning(
+                        "Extração skipped: score=%s, razão=%s",
+                        score.value, reason,
+                    )
+
+                    return ScrapeResult(
+                        extraction_status="skipped",
+                        failure_reason=reason,
+                    )
+
+            # 7. Interação específica por concorrente
             if "vivo.com.br" in message.page_url:
                 await self._fill_vivo_cep(page)
-                await self._navigate_vivo_tabs(page)
+                # Usar VivoTVFlow para navegação de tabs
+                vivo_flow = VivoTVFlow(self._wait_manager, screenshotter)
+                await vivo_flow.navigate_tabs(page)
 
-            # Se é site do Giga+ Fibra, selecionar cidade São Paulo
             if "gigamaisfibra.com.br" in message.page_url:
-                await self._fill_giga_location(page)
+                # Usar GigaFibraFlow (cookie já injetado, verificar modal)
+                giga_flow = GigaFibraFlow(
+                    self._cookie_injector,
+                    self._component_interactor,
+                    screenshotter,
+                )
+                await giga_flow.execute(context, page)
 
-            # 3. Scroll incremental para forçar lazy-loading
+            # 8. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
 
-            # 3.5 Expandir accordions/FAQs para revelar conteúdo oculto
+            # 8.5 Expandir accordions/FAQs para revelar conteúdo oculto
             await self._expand_accordions(page)
 
-            # 4. Voltar ao topo e capturar full_page screenshot
+            # 9. Voltar ao topo e aguardar renderização com wait inteligente
             await page.evaluate("window.scrollTo(0, 0)")
-            await page.wait_for_timeout(10000)  # 10s para garantir renderização completa (Vivo TV)
+            await self._wait_manager.wait_for_page_ready(page)
+
+            # Screenshot antes da extração
+            await screenshotter.capture(page, "before_extraction")
 
             screenshot_bytes = await page.screenshot(
                 full_page=True,
@@ -180,16 +336,43 @@ class PriceScraper:
                 len(screenshot_bytes),
             )
 
-            # 5. Resize para limites do Bedrock
+            # 10. Resize para limites do Bedrock
             screenshot_bytes = self._resize_for_bedrock(screenshot_bytes)
 
-            # 6. Executar estratégia de extração
+            # 11. Executar estratégia de extração
             extractor = self._get_extractor(message.extraction_strategy)
             extraction_result = await extractor.extract(
                 page,
                 message.selector_or_pattern,
                 message.product_name,
             )
+
+            # Calcular tempo total
+            load_time_ms = int((time.perf_counter() - start_time) * 1000)
+
+            # Health Check Score
+            score, reason, extraction_skipped = self._health_check_scorer.score(
+                validation_result=validation_result,
+                extraction_success=extraction_result.success,
+                network_error=False,
+            )
+
+            # Log estruturado de execução
+            self._structured_logger.log_execution(ScrapeExecutionLog(
+                url=message.page_url,
+                page_title=await page.title(),
+                load_time_ms=load_time_ms,
+                price_count=1 if extraction_result.success else 0,
+                plan_count=1 if extraction_result.success else 0,
+                detected_language=(
+                    validation_result.detected_language
+                    if validation_result else "pt"
+                ),
+                detected_currency=(
+                    validation_result.detected_currency
+                    if validation_result else "BRL"
+                ),
+            ))
 
             # Montar ScrapeResult
             if extraction_result.success:
@@ -198,6 +381,14 @@ class PriceScraper:
                     message.product_name,
                     extraction_result.price,
                 )
+
+                # Log de sucesso
+                self._structured_logger.log_success(ScrapeSuccessLog(
+                    health_check_score=score.value,
+                    prices_extracted=1,
+                    screenshots_count=screenshotter.step_count,
+                ))
+
                 return ScrapeResult(
                     extraction_status="success",
                     extracted_price=extraction_result.price,
@@ -224,6 +415,16 @@ class PriceScraper:
                 "Erro inesperado durante scraping de '%s': %s",
                 message.product_name, e, exc_info=True,
             )
+
+            # Capturar diagnóstico se page disponível
+            if page:
+                try:
+                    await diagnostics.capture_diagnostic(
+                        page, e, message.competitor_id, message.cycle_id
+                    )
+                except Exception:
+                    pass
+
             return ScrapeResult(
                 extraction_status="failed",
                 failure_reason=f"Erro inesperado: {str(e)}",
@@ -251,7 +452,7 @@ class PriceScraper:
     ) -> MultiPriceExtractionResult:
         """Extrai TODOS os planos/preços de uma página de concorrente.
 
-        Fluxo idêntico ao scrape() para navegação, mas usa
+        Fluxo resiliente idêntico ao scrape() para navegação, mas usa
         AIExtractor.extract_all() para obter todos os planos de uma vez.
 
         Args:
@@ -267,9 +468,17 @@ class PriceScraper:
             message.page_url,
         )
 
+        start_time = time.perf_counter()
         playwright_instance = None
         browser = None
         page: Page | None = None
+
+        # Instanciar screenshotter e diagnostics para esta execução
+        screenshotter = StepScreenshotter(
+            competitor_id=message.competitor_id,
+            cycle_id=message.cycle_id,
+        )
+        diagnostics = DiagnosticsCollector()
 
         try:
             # 1. Abrir browser com viewport
@@ -309,72 +518,160 @@ class PriceScraper:
             )
             page = await context.new_page()
 
-            # 2. Navegar até a URL
-            try:
-                response = await page.goto(
-                    message.page_url,
-                    timeout=_NAVIGATION_TIMEOUT_MS,
-                    wait_until="domcontentloaded",
+            # 2. Injetar cookies de geolocalização (ANTES da navegação)
+            site_config = self._get_site_config(message.page_url)
+            if site_config:
+                injection_result = await self._cookie_injector.inject_cookies(
+                    context, site_config
                 )
-                if response and response.status >= 400:
-                    logger.error(
-                        "HTTP %d para '%s'",
-                        response.status,
-                        message.page_url,
-                    )
-                    return MultiPriceExtractionResult(
-                        success=False,
-                        failure_reason=(
-                            f"HTTP {response.status}"
-                        ),
-                    )
                 logger.info(
-                    "Página carregada (multi): %s",
-                    message.page_url,
+                    "Cookies injetados (multi): %d cookie(s)",
+                    injection_result.cookies_count,
                 )
-            except Exception as nav_error:
+
+            # 3. Navegar com retry automático
+            nav_result = await self._retry_engine.execute(
+                self._navigate_page, "navigation_multi", page, message.page_url
+            )
+
+            if not nav_result.success:
+                failure_reason = (
+                    f"Navegação falhou após {nav_result.attempts} tentativas: "
+                    f"{nav_result.errors[-1] if nav_result.errors else 'erro desconhecido'}"
+                )
+                logger.error(failure_reason)
+                return MultiPriceExtractionResult(
+                    success=False,
+                    failure_reason=failure_reason,
+                )
+
+            # Verificar status HTTP
+            response = nav_result.result
+            if response and response.status >= 400:
                 logger.error(
-                    "Erro de navegação para '%s': %s",
+                    "HTTP %d para '%s'",
+                    response.status,
                     message.page_url,
-                    nav_error,
                 )
                 return MultiPriceExtractionResult(
                     success=False,
-                    failure_reason=(
-                        f"Erro de navegação: {str(nav_error)}"
-                    ),
+                    failure_reason=f"HTTP {response.status}",
                 )
 
-            # Esperar network idle antes do scroll
-            try:
-                await page.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:
-                pass  # Timeout OK
+            logger.info(
+                "Página carregada (multi): %s", message.page_url
+            )
 
-            # Se é site da Vivo, inserir CEP para desbloquear preços
+            # 4. Aguardar página pronta com waits inteligentes
+            site_key = _get_site_key(message.page_url)
+            critical_selectors = _CRITICAL_SELECTORS.get(site_key or "", None)
+            wait_result = await self._wait_manager.wait_for_page_ready(
+                page, critical_selectors=critical_selectors
+            )
+            logger.info(
+                "Página pronta (multi): estratégia='%s', tempo=%dms",
+                wait_result.strategy_used,
+                wait_result.elapsed_ms,
+            )
+
+            # 5. Screenshot após carregamento
+            await screenshotter.capture(page, "after_load")
+
+            # 6. Validar conteúdo para sites com risco geo
+            validation_result = None
+            if site_key in ("netflix", "paramount"):
+                expected_url_pattern = "/br/" if site_key == "paramount" else None
+                validation_result = await self._content_validator.validate(
+                    page,
+                    expected_language="pt",
+                    expected_currency="BRL",
+                    expected_url_pattern=expected_url_pattern,
+                )
+
+                if not validation_result.is_valid:
+                    score, reason, _ = self._health_check_scorer.score(
+                        validation_result=validation_result,
+                        extraction_success=False,
+                        network_error=False,
+                    )
+                    await diagnostics.capture_diagnostic(
+                        page,
+                        reason or "geo_validation_failed",
+                        message.competitor_id,
+                        message.cycle_id,
+                    )
+                    logger.warning(
+                        "Extração multi skipped: score=%s, razão=%s",
+                        score.value, reason,
+                    )
+                    return MultiPriceExtractionResult(
+                        success=False,
+                        failure_reason=reason,
+                    )
+
+            # 7. Interação específica por concorrente
             if "vivo.com.br" in message.page_url:
                 await self._fill_vivo_cep(page)
-                await self._navigate_vivo_tabs(page)
+                vivo_flow = VivoTVFlow(self._wait_manager, screenshotter)
+                await vivo_flow.navigate_tabs(page)
 
-            # Se é site do Giga+ Fibra, selecionar cidade São Paulo
             if "gigamaisfibra.com.br" in message.page_url:
-                await self._fill_giga_location(page)
+                giga_flow = GigaFibraFlow(
+                    self._cookie_injector,
+                    self._component_interactor,
+                    screenshotter,
+                )
+                await giga_flow.execute(context, page)
 
-            # 3. Scroll incremental para forçar lazy-loading
+            # 8. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
 
-            # 3.5 Expandir accordions/FAQs para revelar conteúdo oculto
+            # 8.5 Expandir accordions/FAQs para revelar conteúdo oculto
             await self._expand_accordions(page)
 
-            # 4. Voltar ao topo
+            # 9. Voltar ao topo e aguardar renderização com wait inteligente
             await page.evaluate("window.scrollTo(0, 0)")
-            await page.wait_for_timeout(10000)  # 10s para garantir renderização completa (Vivo TV)
+            await self._wait_manager.wait_for_page_ready(page)
 
-            # 5. Usar AIExtractor.extract_all
+            # Screenshot antes da extração
+            await screenshotter.capture(page, "before_extraction")
+
+            # 10. Usar AIExtractor.extract_all
             extractor = AIExtractor()
             result = await extractor.extract_all(
                 page, message.competitor_name
             )
+
+            # Calcular tempo e log estruturado
+            load_time_ms = int((time.perf_counter() - start_time) * 1000)
+            score, reason, _ = self._health_check_scorer.score(
+                validation_result=validation_result,
+                extraction_success=result.success,
+                network_error=False,
+            )
+
+            self._structured_logger.log_execution(ScrapeExecutionLog(
+                url=message.page_url,
+                page_title=await page.title(),
+                load_time_ms=load_time_ms,
+                price_count=len(result.plans) if result.success else 0,
+                plan_count=len(result.plans) if result.success else 0,
+                detected_language=(
+                    validation_result.detected_language
+                    if validation_result else "pt"
+                ),
+                detected_currency=(
+                    validation_result.detected_currency
+                    if validation_result else "BRL"
+                ),
+            ))
+
+            if result.success:
+                self._structured_logger.log_success(ScrapeSuccessLog(
+                    health_check_score=score.value,
+                    prices_extracted=len(result.plans),
+                    screenshots_count=screenshotter.step_count,
+                ))
 
             return result
 
@@ -385,6 +682,16 @@ class PriceScraper:
                 e,
                 exc_info=True,
             )
+
+            # Capturar diagnóstico se page disponível
+            if page:
+                try:
+                    await diagnostics.capture_diagnostic(
+                        page, e, message.competitor_id, message.cycle_id
+                    )
+                except Exception:
+                    pass
+
             return MultiPriceExtractionResult(
                 success=False,
                 failure_reason=f"Erro inesperado: {str(e)}",
@@ -468,13 +775,9 @@ class PriceScraper:
 
             # Recarregar a página para aplicar a localização
             await page.reload(wait_until="domcontentloaded")
-            await page.wait_for_timeout(5000)
 
-            # Esperar network idle
-            try:
-                await page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
+            # Esperar página pronta com wait inteligente
+            await self._wait_manager.wait_for_page_ready(page)
 
             logger.info("Vivo TV: página recarregada com localização SP")
 
@@ -484,326 +787,69 @@ class PriceScraper:
             )
 
     async def _navigate_vivo_tabs(self, page: Page) -> None:
-        """Navega pelas tabs de ofertas da Vivo para capturar todos os planos.
+        """DEPRECATED — agora usa VivoTVFlow.
 
-        O site da Vivo tem 3 seções de ofertas em tabs:
-        - TV Online
-        - TV por Assinatura
-        - Vivo Fibra + TV
-
-        Clica em cada tab para forçar o carregamento do conteúdo,
-        garantindo que o screenshot final e a extração por IA
-        capturem informações de todas as categorias.
+        Mantido como fallback caso o VivoTVFlow não seja adequado.
+        Navega pelas tabs de ofertas da Vivo para capturar todos os planos.
 
         Args:
             page: Página Playwright já com localização SP definida.
         """
-        try:
-            logger.info("Vivo TV: navegando pelas tabs de ofertas...")
-
-            # Esperar as tabs carregarem (demora uns segundos)
-            await page.wait_for_timeout(5000)
-
-            # Buscar tabs/botões de navegação de ofertas
-            tab_texts = [
-                "TV Online",
-                "TV por Assinatura",
-                "Vivo Fibra + TV",
-                "Fibra + TV",
-                "TV + Fibra",
-            ]
-
-            tabs_clicked = 0
-            for tab_text in tab_texts:
-                try:
-                    # Tentar clicar na tab pelo texto
-                    tab = await page.query_selector(
-                        f"text='{tab_text}'"
-                    )
-                    if tab:
-                        await tab.click(timeout=3000)
-                        tabs_clicked += 1
-                        # Esperar conteúdo carregar
-                        await page.wait_for_timeout(3000)
-                        try:
-                            await page.wait_for_load_state(
-                                "networkidle", timeout=8000
-                            )
-                        except Exception:
-                            pass
-                        logger.info(
-                            "Vivo TV: tab '%s' clicada",
-                            tab_text,
-                        )
-                except Exception:
-                    pass
-
-            # Se não encontrou tabs por texto, tentar seletores genéricos
-            if tabs_clicked == 0:
-                try:
-                    tabs = await page.query_selector_all(
-                        "[role='tab'], "
-                        "[class*='tab-item'], "
-                        "[class*='tab-link'], "
-                        "nav [class*='item']"
-                    )
-                    for tab in tabs[:5]:
-                        try:
-                            await tab.click(timeout=2000)
-                            tabs_clicked += 1
-                            await page.wait_for_timeout(2000)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-            if tabs_clicked > 0:
-                logger.info(
-                    "Vivo TV: %d tabs de ofertas navegadas",
-                    tabs_clicked,
-                )
-            else:
-                logger.info(
-                    "Vivo TV: nenhuma tab de ofertas encontrada"
-                )
-
-            # Voltar para a primeira tab para screenshot completo
-            # (ou deixar na última que foi clicada)
-            await page.wait_for_timeout(2000)
-
-        except Exception as e:
-            logger.warning(
-                "Vivo TV: falha ao navegar tabs: %s", e
-            )
+        # Delegado para VivoTVFlow — este método é mantido apenas
+        # para compatibilidade reversa mas não é mais chamado diretamente.
+        pass
 
     async def _fill_giga_location(self, page: Page) -> None:
-        """Seleciona São Paulo no popup de localização do Giga+ Fibra.
+        """DEPRECATED — agora usa GigaFibraFlow com cookie injection.
 
-        O site exibe um modal "Onde você está?" com um dropdown
-        de cidades. Interage com o popup para selecionar São Paulo.
-        Se São Paulo não estiver disponível, seleciona a primeira
-        opção disponível no dropdown.
+        O fluxo principal agora injeta cookies de geolocalização ANTES
+        da navegação e usa GigaFibraFlow para verificar supressão do modal
+        e fallback via Cascade Strategy. Este método é mantido apenas
+        para compatibilidade reversa mas não é mais chamado diretamente.
 
         Args:
             page: Página Playwright já navegada.
         """
-        try:
-            logger.info(
-                "Giga+ Fibra: verificando popup de localização..."
+        # Delegado para GigaFibraFlow — não chamado diretamente.
+        pass
+
+    async def _navigate_page(self, page: Page, url: str):
+        """Navega para URL com domcontentloaded wait.
+
+        Usada como operação para o RetryEngine.
+
+        Args:
+            page: Página Playwright.
+            url: URL destino.
+
+        Returns:
+            Response do Playwright.
+        """
+        response = await page.goto(
+            url,
+            timeout=_NAVIGATION_TIMEOUT_MS,
+            wait_until="domcontentloaded",
+        )
+        return response
+
+    def _get_site_config(self, url: str) -> dict | None:
+        """Retorna configuração do site para cookie injection.
+
+        Verifica se a URL corresponde a um site com cookies de
+        geolocalização configurados.
+
+        Args:
+            url: URL da página.
+
+        Returns:
+            Dict de configuração do site ou None se não configurado.
+        """
+        if "gigamaisfibra.com.br" in url:
+            from scraping_resilience.site_configs.giga_fibra import (
+                GIGA_FIBRA_CONFIG,
             )
-
-            # Aguardar popup aparecer (até 8s)
-            popup_visible = False
-            try:
-                await page.wait_for_selector(
-                    "text='Onde você está'",
-                    timeout=8000,
-                )
-                popup_visible = True
-            except Exception:
-                # Popup pode não aparecer (cookie já setado)
-                logger.info(
-                    "Giga+ Fibra: popup de localização não apareceu, "
-                    "continuando normalmente."
-                )
-
-            if not popup_visible:
-                return
-
-            logger.info(
-                "Giga+ Fibra: popup detectado, selecionando cidade..."
-            )
-
-            # Tentar interagir com o select/dropdown de cidade
-            # Estratégia 1: select element nativo
-            select_found = False
-            try:
-                select_el = await page.wait_for_selector(
-                    "select", timeout=3000
-                )
-                if select_el:
-                    # Tentar selecionar "São Paulo" por label
-                    try:
-                        await page.select_option(
-                            "select",
-                            label="São Paulo",
-                        )
-                        select_found = True
-                        logger.info(
-                            "Giga+ Fibra: São Paulo selecionado "
-                            "via <select>"
-                        )
-                    except Exception:
-                        # São Paulo não disponível, selecionar
-                        # primeira opção não-vazia
-                        logger.info(
-                            "Giga+ Fibra: São Paulo não disponível"
-                            ", selecionando primeira opção..."
-                        )
-                        first_option = await page.evaluate("""
-                            () => {
-                                const sel = document.querySelector(
-                                    'select'
-                                );
-                                if (!sel) return null;
-                                for (let i = 0; i < sel.options.length; i++) {
-                                    const opt = sel.options[i];
-                                    if (opt.value && opt.value !== ''
-                                        && !opt.disabled) {
-                                        return opt.value;
-                                    }
-                                }
-                                return null;
-                            }
-                        """)
-                        if first_option:
-                            await page.select_option(
-                                "select", value=first_option
-                            )
-                            select_found = True
-                            logger.info(
-                                "Giga+ Fibra: primeira opção "
-                                "selecionada: %s",
-                                first_option,
-                            )
-            except Exception:
-                pass
-
-            # Estratégia 2: input com autocomplete/typeahead
-            if not select_found:
-                try:
-                    input_el = await page.query_selector(
-                        "input[placeholder*='cidade'], "
-                        "input[placeholder*='Selecione'], "
-                        "input[type='text']"
-                    )
-                    if input_el:
-                        await input_el.click()
-                        await input_el.fill("São Paulo")
-                        await page.wait_for_timeout(1500)
-
-                        # Tentar clicar em "São Paulo"
-                        try:
-                            await page.click(
-                                "text='São Paulo'",
-                                timeout=3000,
-                            )
-                            select_found = True
-                            logger.info(
-                                "Giga+ Fibra: São Paulo selecionado "
-                                "via input typeahead"
-                            )
-                        except Exception:
-                            # Fallback: limpar e clicar na primeira
-                            # opção da lista
-                            logger.info(
-                                "Giga+ Fibra: São Paulo não encontrado"
-                                ", selecionando primeira opção..."
-                            )
-                            await input_el.fill("")
-                            await input_el.click()
-                            await page.wait_for_timeout(1500)
-                            try:
-                                first_item = await page.query_selector(
-                                    "li:not([aria-disabled='true']), "
-                                    "[role='option']:not([aria-disabled])"
-                                )
-                                if first_item:
-                                    await first_item.click()
-                                    select_found = True
-                                    logger.info(
-                                        "Giga+ Fibra: primeira opção "
-                                        "selecionada via typeahead"
-                                    )
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-            # Estratégia 3: dropdown customizado
-            if not select_found:
-                try:
-                    dropdown_trigger = await page.query_selector(
-                        "[class*='select'], [class*='dropdown'], "
-                        "[role='combobox'], [role='listbox']"
-                    )
-                    if dropdown_trigger:
-                        await dropdown_trigger.click()
-                        await page.wait_for_timeout(1000)
-
-                        # Tentar São Paulo primeiro
-                        try:
-                            await page.click(
-                                "text='São Paulo'", timeout=2000
-                            )
-                            select_found = True
-                            logger.info(
-                                "Giga+ Fibra: São Paulo selecionado "
-                                "via dropdown customizado"
-                            )
-                        except Exception:
-                            # Fallback: primeira opção visível
-                            try:
-                                first_opt = await page.query_selector(
-                                    "[role='option'], li, "
-                                    ".dropdown-item, "
-                                    "[class*='option']"
-                                )
-                                if first_opt:
-                                    await first_opt.click()
-                                    select_found = True
-                                    logger.info(
-                                        "Giga+ Fibra: primeira opção "
-                                        "selecionada via dropdown"
-                                    )
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-            if not select_found:
-                logger.warning(
-                    "Giga+ Fibra: não conseguiu selecionar cidade"
-                )
-
-            # Clicar no botão OK/Confirmar para fechar o popup
-            try:
-                ok_button = await page.query_selector(
-                    "button:text('OK'), button:text('Ok'), "
-                    "button:text('Confirmar'), "
-                    "button[type='submit']"
-                )
-                if ok_button:
-                    await ok_button.click()
-                    logger.info("Giga+ Fibra: botão OK clicado")
-                else:
-                    await page.click(
-                        "button:has-text('OK')", timeout=3000
-                    )
-            except Exception:
-                logger.warning(
-                    "Giga+ Fibra: não encontrou botão de confirmação"
-                )
-
-            # Aguardar página recarregar com conteúdo regional
-            await page.wait_for_timeout(3000)
-            try:
-                await page.wait_for_load_state(
-                    "networkidle", timeout=10000
-                )
-            except Exception:
-                pass
-
-            logger.info(
-                "Giga+ Fibra: localização São Paulo configurada"
-            )
-
-        except Exception as e:
-            logger.warning(
-                "Giga+ Fibra: falha ao interagir com popup de "
-                "localização: %s",
-                e,
-            )
+            return GIGA_FIBRA_CONFIG
+        return None
 
     async def _scroll_page(self, page: Page) -> None:
         """Scroll incremental para forçar lazy-loading.
@@ -835,7 +881,7 @@ class PriceScraper:
                 f"window.scrollBy(0, {_VIEWPORT_HEIGHT})"
             )
 
-            # Esperar conteúdo carregar
+            # Esperar conteúdo carregar (condição-based, sem sleep fixo)
             try:
                 await page.wait_for_load_state(
                     "networkidle", timeout=5000
@@ -843,7 +889,8 @@ class PriceScraper:
             except Exception:
                 pass  # Timeout é OK, alguns sites nunca ficam idle
 
-            await asyncio.sleep(0.3)
+            # Aguardar brevemente via wait_for_timeout (Playwright-managed)
+            await page.wait_for_timeout(300)
             previous_height = current_height
 
         logger.info(
