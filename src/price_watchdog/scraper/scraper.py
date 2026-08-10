@@ -18,6 +18,7 @@ Requirements: 1.1, 1.4, 2.1, 3.1, 3.4, 4.1, 5.1, 7.1, 11.2
 from __future__ import annotations
 
 import logging
+import os
 import time
 from io import BytesIO
 
@@ -156,11 +157,15 @@ class PriceScraper:
         network_error_occurred = False
 
         # Instanciar screenshotter e diagnostics para esta execução
+        s3_bucket = os.environ.get(
+            "S3_BUCKET", "price-watchdog-screenshots-761018874615"
+        )
         screenshotter = StepScreenshotter(
             competitor_id=message.competitor_id,
             cycle_id=message.cycle_id,
+            bucket=s3_bucket,
         )
-        diagnostics = DiagnosticsCollector()
+        diagnostics = DiagnosticsCollector(bucket=s3_bucket)
 
         try:
             # 1. Abrir browser com viewport
@@ -474,11 +479,15 @@ class PriceScraper:
         page: Page | None = None
 
         # Instanciar screenshotter e diagnostics para esta execução
+        s3_bucket = os.environ.get(
+            "S3_BUCKET", "price-watchdog-screenshots-761018874615"
+        )
         screenshotter = StepScreenshotter(
             competitor_id=message.competitor_id,
             cycle_id=message.cycle_id,
+            bucket=s3_bucket,
         )
-        diagnostics = DiagnosticsCollector()
+        diagnostics = DiagnosticsCollector(bucket=s3_bucket)
 
         try:
             # 1. Abrir browser com viewport
