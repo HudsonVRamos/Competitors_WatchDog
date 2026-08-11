@@ -41,6 +41,7 @@ class VivoTVFlow:
     Atributos:
         _wait_manager: Gerenciador de esperas inteligentes.
         _screenshotter: Capturador de screenshots sequenciais.
+        accumulated_text: Texto acumulado de todas as tabs visitadas.
     """
 
     def __init__(
@@ -58,6 +59,7 @@ class VivoTVFlow:
         """
         self._wait_manager = wait_manager
         self._screenshotter = screenshotter
+        self.accumulated_text: str = ""
 
     async def navigate_tabs(self, page: Page) -> list[dict[str, Any]]:
         """Navega pelas 3 tabs da Vivo TV e consolida planos.
@@ -68,6 +70,9 @@ class VivoTVFlow:
         3. Aguarda mudança de conteúdo (até 15s)
         4. Captura screenshot independente
         5. Extrai planos da tab atual
+
+        Ao final, volta para a primeira tab ("TV Online") para que o
+        screenshot final capture os planos básicos (mais comparáveis).
 
         Se uma tab não for encontrada ou o conteúdo não mudar após 15s,
         registra warning e prossegue para a próxima tab.
@@ -84,6 +89,21 @@ class VivoTVFlow:
         for tab_name in VIVO_TV_TABS:
             tab_plans = await self._process_tab(page, tab_name)
             all_plans.extend(tab_plans)
+
+        # Voltar para a primeira tab para o screenshot final
+        # capturar os planos básicos de "TV Online"
+        try:
+            first_tab = page.get_by_text(VIVO_TV_TABS[0], exact=False)
+            if await first_tab.count() > 0:
+                await first_tab.first.click()
+                await self._wait_manager.wait_for_content_change(
+                    page,
+                    CONTENT_CHANGE_SELECTORS,
+                    timeout_ms=CONTENT_CHANGE_TIMEOUT_MS,
+                )
+                logger.info("Voltou para tab '%s' para screenshot final.", VIVO_TV_TABS[0])
+        except Exception as exc:
+            logger.warning("Não foi possível voltar à tab '%s': %s", VIVO_TV_TABS[0], exc)
 
         # Consolidar e remover duplicatas
         deduplicated = self._deduplicate_plans(all_plans)
@@ -138,6 +158,13 @@ class VivoTVFlow:
 
             # Capturar screenshot independente para esta tab
             await self._screenshotter.capture(page, f"tab_{tab_name}")
+
+            # Acumular texto visível da tab para contexto do AI
+            try:
+                tab_text = await page.inner_text("body")
+                self.accumulated_text += f"\n\n--- TAB: {tab_name} ---\n{tab_text}"
+            except Exception:
+                pass
 
             # Extrair planos da tab atual
             tab_plans = await self._extract_tab_plans(page, tab_name)

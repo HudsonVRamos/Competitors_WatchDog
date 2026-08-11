@@ -310,7 +310,7 @@ class AIExtractor(BaseExtractor):
             )
 
     async def extract_all(
-        self, page: Page, competitor_name: str
+        self, page: Page, competitor_name: str, extra_text: str = ""
     ) -> MultiPriceExtractionResult:
         """Extrai TODOS os planos e preços visíveis na página.
 
@@ -323,6 +323,7 @@ class AIExtractor(BaseExtractor):
         Args:
             page: Página Playwright já navegada e scrollada.
             competitor_name: Nome do concorrente (para contexto).
+            extra_text: Texto adicional acumulado (ex: de múltiplas tabs).
 
         Returns:
             MultiPriceExtractionResult com lista de planos encontrados.
@@ -345,11 +346,16 @@ class AIExtractor(BaseExtractor):
             # Capturar texto da página como contexto adicional
             try:
                 page_text = await page.inner_text("body")
-                # Truncar a 8000 chars para não exceder token limit
-                if len(page_text) > 8000:
-                    page_text = page_text[:8000]
             except Exception:
                 page_text = ""
+
+            # Combinar com texto extra (de tabs navegadas anteriormente)
+            if extra_text:
+                page_text = extra_text + "\n\n" + page_text
+
+            # Truncar a 12000 chars para não exceder token limit
+            if len(page_text) > 12000:
+                page_text = page_text[:12000]
 
             # Chamar Bedrock com prompt multi-plano + texto
             result = await self._invoke_bedrock_all_with_retry(
@@ -427,36 +433,44 @@ class AIExtractor(BaseExtractor):
         ).decode("utf-8")
 
         prompt = (
-            "Analise esta screenshot de uma página web de um "
+            "Analise esta screenshot e o texto abaixo de uma página web de um "
             "provedor de TV/streaming/internet brasileiro. "
-            "Liste TODOS os planos/pacotes com o máximo de "
-            "detalhes possível sobre cada um. "
-            "Se houver parcelamento (ex: 12x R$34,90/mês), "
-            "retorne o valor da parcela mensal. "
-            "\n\nPara cada plano, extraia TODOS os campos "
-            "disponíveis:"
-            "\n- name: nome do plano"
-            "\n- price: preço mensal (R$ XX,XX)"
-            "\n- promo_price: preço promocional se houver"
-            "\n- promo_months: duração da promoção em meses"
-            "\n- channels: número de canais lineares"
-            "\n- screens: número de telas simultâneas"
+            "Liste CADA plano/pacote INDIVIDUALMENTE — não agrupe nem resuma. "
+            "Se a página mostra 3 planos separados, retorne 3 objetos. "
+            "Se houver tabs/abas diferentes (ex: 'TV Online', 'TV por Assinatura', "
+            "'Fibra + TV'), extraia os planos de TODAS as abas/seções visíveis "
+            "no texto fornecido."
+            "\n\nREGRAS IMPORTANTES:"
+            "\n- Cada card/box de plano visível = 1 entrada separada no JSON"
+            "\n- Se um plano tem preço promocional (ex: 'R$22,50 no primeiro mês, "
+            "depois R$45/mês'), use price=45 e promo_price=22.50 com promo_months=1"
+            "\n- Se houver parcelamento (12x R$34,90/mês), use price=34.90"
+            "\n- Extraia o número EXATO de canais se mencionado (ex: '+ 40 canais' = 40)"
+            "\n- Extraia telas simultâneas se mencionado (ex: 'até 3 acessos' = 3)"
+            "\n- NÃO invente dados — só preencha o que está visível/mencionado"
+            "\n\nPara cada plano, extraia:"
+            "\n- name: nome completo do plano (ex: 'Vivo TV Inicial', 'Pacote Premium')"
+            "\n- price: preço mensal NORMAL em número (ex: 45.00)"
+            "\n- promo_price: preço promocional se houver (ex: 22.50)"
+            "\n- promo_months: meses de promoção (ex: 1)"
+            "\n- channels: número de canais lineares (ex: 40, 80, 128)"
+            "\n- screens: número de telas/acessos simultâneos (ex: 2, 3, 4)"
             "\n- tv_devices: número de aparelhos de TV inclusos"
-            "\n- has_fiber: true/false se inclui fibra"
-            "\n- fiber_speed_mbps: velocidade da fibra em Mbps"
-            "\n- has_mobile: true/false se inclui internet móvel"
+            "\n- has_fiber: true se o plano inclui fibra/internet"
+            "\n- fiber_speed_mbps: velocidade da fibra em Mbps (ex: 500, 600)"
+            "\n- has_mobile: true se inclui internet móvel"
             "\n- mobile_speed_mbps: velocidade móvel em Mbps"
             "\n- streamings: lista de streamings inclusos "
-            "(ex: [\"HBO Max\", \"Netflix\", \"Telecine\"])"
-            "\n- extras: outros benefícios mencionados"
+            "(ex: [\"HBO Max\", \"Netflix\", \"Globoplay\"])"
+            "\n- extras: outros benefícios (ex: 'YouTube Premium grátis 3 meses')"
             "\n\nRetorne APENAS um JSON no formato: "
-            '{"plans": [{"name": "...", "price": "R$ XX,XX", '
-            '"promo_price": null, "promo_months": null, '
-            '"channels": null, "screens": null, '
+            '{"plans": [{"name": "...", "price": 45.00, '
+            '"promo_price": 22.50, "promo_months": 1, '
+            '"channels": 40, "screens": 3, '
             '"tv_devices": null, '
             '"has_fiber": false, "fiber_speed_mbps": null, '
             '"has_mobile": false, "mobile_speed_mbps": null, '
-            '"streamings": [], "extras": ""}, ...]}'
+            '"streamings": ["Netflix"], "extras": "YouTube Premium 3 meses"}, ...]}'
             "\n\nUse null para campos não visíveis/não aplicáveis."
             "\n\nSe não encontrar nenhum plano/preço, retorne: "
             '{"plans": []}'
@@ -582,63 +596,70 @@ class AIExtractor(BaseExtractor):
                 plan_name = plan.get("name", "").strip()
                 price_text = plan.get("price", "")
 
-                if not plan_name or not price_text:
+                if not plan_name:
                     continue
 
-                price = PriceParser.parse(str(price_text))
-                if price is not None:
-                    # Construir plano com todos os campos disponíveis
-                    parsed_plan = {
-                        "name": plan_name,
-                        "price": price,
-                    }
+                # Parsear preço (pode ser None para planos sem preço visível)
+                price = None
+                if price_text:
+                    price = PriceParser.parse(str(price_text))
 
-                    # Campos opcionais de composição
-                    promo_text = plan.get("promo_price")
-                    if promo_text:
-                        promo = PriceParser.parse(str(promo_text))
-                        if promo:
-                            parsed_plan["promo_price"] = promo
+                # Aceitar plano se tem preço OU se tem algum dado de composição
+                has_composition = any([
+                    plan.get("channels"),
+                    plan.get("screens"),
+                    plan.get("streamings"),
+                    plan.get("has_fiber"),
+                    plan.get("promo_price"),
+                ])
 
-                    if plan.get("promo_months"):
-                        parsed_plan["promo_months"] = plan["promo_months"]
+                if price is None and not has_composition:
+                    continue
 
-                    if plan.get("channels"):
-                        parsed_plan["channels"] = plan["channels"]
+                # Construir plano com todos os campos disponíveis
+                parsed_plan = {
+                    "name": plan_name,
+                    "price": price,
+                }
 
-                    if plan.get("screens"):
-                        parsed_plan["screens"] = plan["screens"]
+                # Campos opcionais de composição
+                promo_text = plan.get("promo_price")
+                if promo_text:
+                    promo = PriceParser.parse(str(promo_text))
+                    if promo:
+                        parsed_plan["promo_price"] = promo
 
-                    if plan.get("tv_devices"):
-                        parsed_plan["tv_devices"] = plan["tv_devices"]
+                if plan.get("promo_months"):
+                    parsed_plan["promo_months"] = plan["promo_months"]
 
-                    if plan.get("has_fiber"):
-                        parsed_plan["has_fiber"] = plan["has_fiber"]
+                if plan.get("channels"):
+                    parsed_plan["channels"] = plan["channels"]
 
-                    if plan.get("fiber_speed_mbps"):
-                        parsed_plan["fiber_speed_mbps"] = plan["fiber_speed_mbps"]
+                if plan.get("screens"):
+                    parsed_plan["screens"] = plan["screens"]
 
-                    if plan.get("has_mobile"):
-                        parsed_plan["has_mobile"] = plan["has_mobile"]
+                if plan.get("tv_devices"):
+                    parsed_plan["tv_devices"] = plan["tv_devices"]
 
-                    if plan.get("mobile_speed_mbps"):
-                        parsed_plan["mobile_speed_mbps"] = plan["mobile_speed_mbps"]
+                if plan.get("has_fiber"):
+                    parsed_plan["has_fiber"] = plan["has_fiber"]
 
-                    if plan.get("streamings"):
-                        parsed_plan["streamings"] = plan["streamings"]
+                if plan.get("fiber_speed_mbps"):
+                    parsed_plan["fiber_speed_mbps"] = plan["fiber_speed_mbps"]
 
-                    if plan.get("extras"):
-                        parsed_plan["extras"] = plan["extras"]
+                if plan.get("has_mobile"):
+                    parsed_plan["has_mobile"] = plan["has_mobile"]
 
-                    parsed_plans.append(parsed_plan)
-                else:
-                    logger.warning(
-                        "Não foi possível parsear preço '%s' "
-                        "do plano '%s' (%s)",
-                        price_text,
-                        plan_name,
-                        competitor_name,
-                    )
+                if plan.get("mobile_speed_mbps"):
+                    parsed_plan["mobile_speed_mbps"] = plan["mobile_speed_mbps"]
+
+                if plan.get("streamings"):
+                    parsed_plan["streamings"] = plan["streamings"]
+
+                if plan.get("extras"):
+                    parsed_plan["extras"] = plan["extras"]
+
+                parsed_plans.append(parsed_plan)
 
             logger.info(
                 "Extração multi-plano para '%s': %d planos "

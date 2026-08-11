@@ -77,6 +77,8 @@ _CRITICAL_SELECTORS: dict[str, list[str]] = {
     "giga": ["[class*='card']", "[class*='plan']", "[class*='plano']"],
     "netflix": ["[class*='plan']", "[class*='price']"],
     "paramount": ["[class*='plan']", "[class*='price']"],
+    "sky": ["[class*='card']", "[class*='plan']", "[class*='price']", "[class*='combo']"],
+    "globoplay": ["[class*='offer']", "[class*='plan']", "[class*='price']", "[class*='card']"],
 }
 
 
@@ -90,6 +92,10 @@ def _get_site_key(url: str) -> str | None:
         return "netflix"
     if "paramountplus.com" in url:
         return "paramount"
+    if "sky.com.br" in url:
+        return "sky"
+    if "globoplay.globo.com" in url:
+        return "globoplay"
     return None
 
 
@@ -619,10 +625,12 @@ class PriceScraper:
                     )
 
             # 7. Interação específica por concorrente
+            vivo_accumulated_text: str = ""
             if "vivo.com.br" in message.page_url:
                 await self._fill_vivo_cep(page)
                 vivo_flow = VivoTVFlow(self._wait_manager, screenshotter)
                 await vivo_flow.navigate_tabs(page)
+                vivo_accumulated_text = vivo_flow.accumulated_text
 
             if "gigamaisfibra.com.br" in message.page_url:
                 giga_flow = GigaFibraFlow(
@@ -642,13 +650,20 @@ class PriceScraper:
             await page.evaluate("window.scrollTo(0, 0)")
             await self._wait_manager.wait_for_page_ready(page)
 
+            # 9.5 Wait extra para SPAs que demoram a renderizar preços
+            if site_key in ("sky", "globoplay"):
+                import asyncio as _asyncio
+                await _asyncio.sleep(5)
+                logger.info("Wait extra (5s) para SPA: %s", site_key)
+
             # Screenshot antes da extração
             await screenshotter.capture(page, "before_extraction")
 
             # 10. Usar AIExtractor.extract_all
             extractor = AIExtractor()
             result = await extractor.extract_all(
-                page, message.competitor_name
+                page, message.competitor_name,
+                extra_text=vivo_accumulated_text,
             )
 
             # Calcular tempo e log estruturado

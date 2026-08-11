@@ -348,6 +348,16 @@ class Worker:
                     our_price=our_price,
                 )
 
+            # Persistir composição de pacotes extraídos (sempre,
+            # mesmo se intelligence_enabled — os dados de composição
+            # do fluxo de preços são mais completos para os planos)
+            await self._save_package_compositions(
+                plans=multi_result.plans,
+                competitor_id=message.competitor_id,
+                cycle_id=message.cycle_id,
+                competitor_name=message.competitor_name,
+            )
+
             # Extração de inteligência competitiva (após preços)
             if message.intelligence_enabled:
                 await self._process_intelligence(
@@ -712,6 +722,96 @@ class Worker:
                     exc,
                 )
 
+    async def _save_package_compositions(
+        self,
+        plans: list[dict],
+        competitor_id: str,
+        cycle_id: str,
+        competitor_name: str,
+    ) -> None:
+        """Persiste composição de pacotes extraídos na tabela package_compositions.
+
+        Cria um CompetitorIntelligenceRecord (se não existir para este ciclo/competitor)
+        e salva cada plano como PackageComposition vinculado a ele.
+
+        Os dados de composição vêm do AI extractor no fluxo de preços multi-plano,
+        garantindo que canais, fibra, streamings, telas e promo sejam persistidos.
+
+        Args:
+            plans: Lista de dicts com dados de cada plano extraído.
+            competitor_id: ID do concorrente.
+            cycle_id: ID do ciclo de monitoramento.
+            competitor_name: Nome do concorrente (para logging).
+        """
+        try:
+            if self._intelligence_store is None:
+                logger.debug(
+                    "IntelligenceStore não disponível, "
+                    "ignorando persistência de composição: "
+                    "competitor=%s",
+                    competitor_name,
+                )
+                return
+
+            if not plans:
+                return
+
+            # Criar record de inteligência para vincular os pacotes
+            record = CompetitorIntelligenceRecord(
+                cycle_id=cycle_id,
+                competitor_id=competitor_id,
+                extraction_status="success",
+                failure_reason=None,
+            )
+
+            # Criar PackageComposition para cada plano com dados de composição
+            for plan in plans:
+                streamings = plan.get("streamings", []) or []
+                pkg = PackageComposition(
+                    plan_name=plan["name"],
+                    default_price=plan.get("price"),
+                    promotional_price=plan.get("promo_price"),
+                    promotional_period_months=plan.get("promo_months"),
+                    linear_channels=plan.get("channels"),
+                    simultaneous_screens=plan.get("screens"),
+                    has_fiber=plan.get("has_fiber"),
+                    fiber_speed_mbps=plan.get("fiber_speed_mbps"),
+                    has_mobile_internet=plan.get("has_mobile"),
+                    mobile_speed_mbps=plan.get("mobile_speed_mbps"),
+                    bundled_streaming_1=(
+                        streamings[0] if len(streamings) > 0 else None
+                    ),
+                    bundled_streaming_2=(
+                        streamings[1] if len(streamings) > 1 else None
+                    ),
+                    bundled_streaming_3=(
+                        streamings[2] if len(streamings) > 2 else None
+                    ),
+                )
+                record.packages.append(pkg)
+
+            await self._intelligence_store.save_record(record)
+
+            logger.info(
+                "Composição de pacotes persistida: "
+                "competitor=%s, cycle_id=%s, pacotes=%d",
+                competitor_name,
+                cycle_id,
+                len(plans),
+            )
+
+        except Exception as exc:
+            # Isolamento: falha na persistência de composição
+            # não interrompe o fluxo de preços
+            logger.error(
+                "Falha ao persistir composição de pacotes "
+                "(isolada): competitor=%s, cycle_id=%s, erro=%s",
+                competitor_name,
+                cycle_id,
+                exc,
+                exc_info=True,
+            )
+
     async def _process_intelligence(
         self,
         screenshot_bytes: bytes | None,
@@ -753,7 +853,7 @@ class Worker:
                 )
                 return
 
-            # Se screenshot indisponível: registrar falha imediata
+            # Se screenshot indisponível: atualizar record existente ou criar falha
             if not screenshot_bytes:
                 logger.warning(
                     "Screenshot indisponível para extração de "
@@ -761,15 +861,20 @@ class Worker:
                     competitor_name,
                     cycle_id,
                 )
-                failed_record = CompetitorIntelligenceRecord(
+                existing = await self._get_existing_intelligence_record(
                     cycle_id=cycle_id,
                     competitor_id=competitor_id,
-                    extraction_status="failed",
-                    failure_reason="screenshot_unavailable",
                 )
-                await self._intelligence_store.save_record(
-                    failed_record
-                )
+                if not existing:
+                    failed_record = CompetitorIntelligenceRecord(
+                        cycle_id=cycle_id,
+                        competitor_id=competitor_id,
+                        extraction_status="failed",
+                        failure_reason="screenshot_unavailable",
+                    )
+                    await self._intelligence_store.save_record(
+                        failed_record
+                    )
                 return
 
             # Chamar extrator de inteligência com screenshot existente
@@ -787,14 +892,27 @@ class Worker:
             )
 
             # Criar record de inteligência a partir do resultado
-            record = CompetitorIntelligenceRecord(
+            # OU buscar record existente (já criado pelo _save_package_compositions)
+            existing_record = await self._get_existing_intelligence_record(
                 cycle_id=cycle_id,
                 competitor_id=competitor_id,
-                extraction_status=result.status,
-                failure_reason=result.failure_reason,
-                extraction_latency_ms=result.latency_ms,
-                retry_count=result.retry_count,
             )
+
+            if existing_record:
+                record = existing_record
+                record.extraction_status = result.status
+                record.failure_reason = result.failure_reason
+                record.extraction_latency_ms = result.latency_ms
+                record.retry_count = result.retry_count
+            else:
+                record = CompetitorIntelligenceRecord(
+                    cycle_id=cycle_id,
+                    competitor_id=competitor_id,
+                    extraction_status=result.status,
+                    failure_reason=result.failure_reason,
+                    extraction_latency_ms=result.latency_ms,
+                    retry_count=result.retry_count,
+                )
 
             # Preencher dados de comunicação comercial se disponível
             if result.commercial_communication is not None:
@@ -814,42 +932,47 @@ class Worker:
                 )
 
             # Criar PackageComposition entities a partir do resultado
-            for pkg_data in result.package_compositions:
-                streamings = pkg_data.bundled_streamings or []
-                pkg_entity = PackageComposition(
-                    plan_name=pkg_data.plan_name,
-                    default_price=pkg_data.default_price,
-                    promotional_price=pkg_data.promotional_price,
-                    promotional_period_months=(
-                        pkg_data.promotional_period_months
-                    ),
-                    linear_channels=pkg_data.linear_channels,
-                    simultaneous_screens=(
-                        pkg_data.simultaneous_screens
-                    ),
-                    has_fiber=pkg_data.has_fiber,
-                    fiber_speed_mbps=pkg_data.fiber_speed_mbps,
-                    has_mobile_internet=(
-                        pkg_data.has_mobile_internet
-                    ),
-                    mobile_speed_mbps=pkg_data.mobile_speed_mbps,
-                    bundled_streaming_1=(
-                        streamings[0] if len(streamings) > 0
-                        else None
-                    ),
-                    bundled_streaming_2=(
-                        streamings[1] if len(streamings) > 1
-                        else None
-                    ),
-                    bundled_streaming_3=(
-                        streamings[2] if len(streamings) > 2
-                        else None
-                    ),
-                )
-                record.packages.append(pkg_entity)
+            # (apenas se não existirem pacotes já vinculados ao record)
+            if not record.packages:
+                for pkg_data in result.package_compositions:
+                    streamings = pkg_data.bundled_streamings or []
+                    pkg_entity = PackageComposition(
+                        plan_name=pkg_data.plan_name,
+                        default_price=pkg_data.default_price,
+                        promotional_price=pkg_data.promotional_price,
+                        promotional_period_months=(
+                            pkg_data.promotional_period_months
+                        ),
+                        linear_channels=pkg_data.linear_channels,
+                        simultaneous_screens=(
+                            pkg_data.simultaneous_screens
+                        ),
+                        has_fiber=pkg_data.has_fiber,
+                        fiber_speed_mbps=pkg_data.fiber_speed_mbps,
+                        has_mobile_internet=(
+                            pkg_data.has_mobile_internet
+                        ),
+                        mobile_speed_mbps=pkg_data.mobile_speed_mbps,
+                        bundled_streaming_1=(
+                            streamings[0] if len(streamings) > 0
+                            else None
+                        ),
+                        bundled_streaming_2=(
+                            streamings[1] if len(streamings) > 1
+                            else None
+                        ),
+                        bundled_streaming_3=(
+                            streamings[2] if len(streamings) > 2
+                            else None
+                        ),
+                    )
+                    record.packages.append(pkg_entity)
 
-            # Persistir via IntelligenceStore
-            await self._intelligence_store.save_record(record)
+            # Persistir via IntelligenceStore (insert ou update)
+            if existing_record:
+                await self._update_intelligence_record(record)
+            else:
+                await self._intelligence_store.save_record(record)
 
             logger.info(
                 "Inteligência extraída e persistida: "
@@ -878,6 +1001,71 @@ class Worker:
                 "competitor=%s, cycle_id=%s, erro=%s",
                 competitor_name,
                 cycle_id,
+                exc,
+                exc_info=True,
+            )
+
+    async def _get_existing_intelligence_record(
+        self,
+        cycle_id: str,
+        competitor_id: str,
+    ) -> CompetitorIntelligenceRecord | None:
+        """Busca record de inteligência existente para ciclo/competitor.
+
+        Args:
+            cycle_id: ID do ciclo.
+            competitor_id: ID do concorrente.
+
+        Returns:
+            Record existente ou None.
+        """
+        from sqlalchemy import select as sa_select
+
+        from price_watchdog.database import get_session
+
+        try:
+            async with get_session() as session:
+                stmt = (
+                    sa_select(CompetitorIntelligenceRecord)
+                    .where(
+                        CompetitorIntelligenceRecord.cycle_id == cycle_id,
+                        CompetitorIntelligenceRecord.competitor_id
+                        == competitor_id,
+                    )
+                )
+                result = await session.execute(stmt)
+                return result.scalar_one_or_none()
+        except Exception:
+            return None
+
+    async def _update_intelligence_record(
+        self,
+        record: CompetitorIntelligenceRecord,
+    ) -> None:
+        """Atualiza um CompetitorIntelligenceRecord existente.
+
+        Faz merge do record com a sessão para persistir alterações.
+
+        Args:
+            record: Record já modificado a ser atualizado.
+        """
+        from price_watchdog.database import get_session
+
+        try:
+            async with get_session() as session:
+                await session.merge(record)
+            logger.info(
+                "IntelligenceRecord atualizado: competitor_id=%s, "
+                "cycle_id=%s",
+                record.competitor_id,
+                record.cycle_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "Falha ao atualizar IntelligenceRecord: "
+                "competitor_id=%s, cycle_id=%s, erro=%s",
+                record.competitor_id,
+                record.cycle_id,
                 exc,
                 exc_info=True,
             )
