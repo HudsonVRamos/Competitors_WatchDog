@@ -357,6 +357,21 @@ class AIExtractor(BaseExtractor):
             if len(page_text) > 12000:
                 page_text = page_text[:12000]
 
+            # Log do texto para debug (primeiros 200 chars)
+            if "R$" in page_text:
+                logger.info(
+                    "Texto com R$ encontrado para '%s' (%d chars)",
+                    competitor_name,
+                    len(page_text),
+                )
+            else:
+                logger.warning(
+                    "Texto SEM R$ para '%s' (%d chars): '%s'",
+                    competitor_name,
+                    len(page_text),
+                    page_text[:200].replace("\n", " "),
+                )
+
             # Se o texto contém "R$", forçar a AI a usar o texto
             # (sites com SPA escura como Globoplay confundem a AI visualmente)
             text_has_prices = "R$" in page_text

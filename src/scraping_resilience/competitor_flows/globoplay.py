@@ -126,9 +126,9 @@ class GloboplayFlow:
     async def _wait_for_cards(self, page: Page) -> bool:
         """Aguarda cards de preço ficarem visíveis no DOM.
 
-        Usa wait_for_function com timeout de 30s (SPA pesada no ECS
-        pode demorar mais que localmente). Fallback: loop de checks
-        a cada 2s por até 30s.
+        O Globoplay é uma SPA que pode detectar headless browsers.
+        Usa múltiplas estratégias: wait_for_function, polling, e
+        reload como fallback.
 
         Args:
             page: Página Playwright.
@@ -147,21 +147,40 @@ class GloboplayFlow:
                     return body.includes('R$') && body.length > 500;
                 }
                 """,
-                timeout=30_000,  # 30s para SPA no ECS
+                timeout=20_000,
             )
             logger.info("GloboplayFlow: cards detectados via wait_for_function")
             return True
         except Exception:
             pass
 
-        # Estratégia 2: loop de checks a cada 2s (total 20s extra)
-        for i in range(10):
-            await asyncio.sleep(2)
+        # Estratégia 2: recarregar a página e esperar novamente
+        # (algumas SPAs falham no primeiro load mas funcionam no reload)
+        logger.info("GloboplayFlow: tentando reload da página")
+        try:
+            await page.reload(timeout=30_000)
+            await page.wait_for_function(
+                """
+                () => {
+                    const body = document.body.innerText;
+                    return body.includes('R$') && body.length > 500;
+                }
+                """,
+                timeout=20_000,
+            )
+            logger.info("GloboplayFlow: cards detectados após reload")
+            return True
+        except Exception:
+            pass
+
+        # Estratégia 3: polling final
+        for i in range(5):
+            await asyncio.sleep(3)
             text = await page.evaluate("document.body.innerText")
             if "R$" in text and len(text) > 500:
                 logger.info(
                     "GloboplayFlow: cards detectados via polling (%ds)",
-                    (i + 1) * 2,
+                    (i + 1) * 3,
                 )
                 return True
 
