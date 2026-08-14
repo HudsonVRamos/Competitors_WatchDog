@@ -126,8 +126,9 @@ class GloboplayFlow:
     async def _wait_for_cards(self, page: Page) -> bool:
         """Aguarda cards de preço ficarem visíveis no DOM.
 
-        Tenta múltiplos seletores em paralelo. Retorna True assim que
-        algum card com texto "R$" for encontrado.
+        Usa wait_for_function com timeout de 30s (SPA pesada no ECS
+        pode demorar mais que localmente). Fallback: loop de checks
+        a cada 2s por até 30s.
 
         Args:
             page: Página Playwright.
@@ -137,9 +138,8 @@ class GloboplayFlow:
         """
         import asyncio
 
-        # Estratégia: esperar até 15s por elemento que contenha "R$"
+        # Estratégia 1: wait_for_function (mais eficiente)
         try:
-            # Aguardar qualquer elemento com R$ aparecer
             await page.wait_for_function(
                 """
                 () => {
@@ -147,16 +147,25 @@ class GloboplayFlow:
                     return body.includes('R$') && body.length > 500;
                 }
                 """,
-                timeout=_CARDS_WAIT_TIMEOUT_MS,
+                timeout=30_000,  # 30s para SPA no ECS
             )
+            logger.info("GloboplayFlow: cards detectados via wait_for_function")
             return True
         except Exception:
             pass
 
-        # Fallback: esperar 8 segundos fixo e verificar
-        await asyncio.sleep(8)
-        text = await page.evaluate("document.body.innerText")
-        return "R$" in text
+        # Estratégia 2: loop de checks a cada 2s (total 20s extra)
+        for i in range(10):
+            await asyncio.sleep(2)
+            text = await page.evaluate("document.body.innerText")
+            if "R$" in text and len(text) > 500:
+                logger.info(
+                    "GloboplayFlow: cards detectados via polling (%ds)",
+                    (i + 1) * 2,
+                )
+                return True
+
+        return False
 
     async def _click_monthly_tab(self, page: Page) -> None:
         """Tenta clicar na tab 'Mensal' se disponível.

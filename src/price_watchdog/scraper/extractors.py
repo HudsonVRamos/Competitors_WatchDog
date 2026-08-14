@@ -357,6 +357,18 @@ class AIExtractor(BaseExtractor):
             if len(page_text) > 12000:
                 page_text = page_text[:12000]
 
+            # Se o texto contém "R$", forçar a AI a usar o texto
+            # (sites com SPA escura como Globoplay confundem a AI visualmente)
+            text_has_prices = "R$" in page_text
+            if text_has_prices and not any(
+                "R$" in str(b) for b in [screenshot_bytes[:100]]
+            ):
+                logger.info(
+                    "Texto contém preços (R$) — priorizando texto "
+                    "sobre screenshot para '%s'",
+                    competitor_name,
+                )
+
             # Chamar Bedrock com prompt multi-plano + texto
             result = await self._invoke_bedrock_all_with_retry(
                 screenshot_bytes, competitor_name, page_text
@@ -483,14 +495,25 @@ class AIExtractor(BaseExtractor):
 
         # Incluir texto da página como contexto adicional
         if page_text:
-            prompt += (
-                "\n\n--- TEXTO EXTRAÍDO DA PÁGINA ---\n"
-                "IMPORTANTE: Se o screenshot estiver escuro, incompleto "
-                "ou difícil de ler, USE O TEXTO ABAIXO como fonte "
-                "primária para extrair planos e preços. O texto contém "
-                "todo o conteúdo visível da página:\n\n"
-                f"{page_text}"
-            )
+            # Se o texto contém R$ mas o screenshot pode ser escuro/confuso
+            if "R$" in page_text:
+                prompt += (
+                    "\n\n--- TEXTO EXTRAÍDO DA PÁGINA ---\n"
+                    "⚠️ ATENÇÃO: O texto abaixo contém preços em R$. "
+                    "Você DEVE extrair os planos a partir deste texto. "
+                    "NÃO retorne plans vazio se o texto menciona preços. "
+                    "Mesmo que o screenshot pareça escuro ou incompleto, "
+                    "o texto é a fonte primária de dados:\n\n"
+                    f"{page_text}"
+                )
+            else:
+                prompt += (
+                    "\n\n--- TEXTO EXTRAÍDO DA PÁGINA ---\n"
+                    "IMPORTANTE: Se o screenshot estiver escuro, incompleto "
+                    "ou difícil de ler, USE O TEXTO ABAIXO como fonte "
+                    "primária para extrair planos e preços:\n\n"
+                    f"{page_text}"
+                )
 
         request_body = {
             "anthropic_version": "bedrock-2023-05-31",
