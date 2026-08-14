@@ -37,6 +37,12 @@ from price_watchdog.scraper.extractors import (
 )
 
 # Scraping Resilience modules
+from scraping_resilience.cloud_browser import (
+    BrowserStrategy,
+    CloudBrowserConfig,
+    CloudBrowserManager,
+    get_browser_strategy,
+)
 from scraping_resilience.component_interactor import CustomComponentInteractor
 from scraping_resilience.content_validator import ContentValidator
 from scraping_resilience.cookie_injector import GeolocationCookieInjector
@@ -125,6 +131,33 @@ class PriceScraper:
         self._component_interactor = CustomComponentInteractor()
         self._health_check_scorer = HealthCheckScorer()
         self._structured_logger = StructuredLogger()
+        self._cloud_browser_config = CloudBrowserConfig.from_env()
+
+    def _should_use_cloud_browser(self, url: str) -> bool:
+        """Verifica se deve usar Cloud Browser para esta URL.
+
+        Usa a feature flag CLOUD_BROWSER_ENABLED + checagem de domínio.
+
+        Args:
+            url: URL do site a ser scrapeado.
+
+        Returns:
+            True se deve usar cloud browser.
+        """
+        # Verificar se cloud browser está habilitado e configurado
+        if not self._cloud_browser_config.is_configured:
+            return False
+
+        # Verificar feature flag
+        cloud_enabled = os.environ.get(
+            "CLOUD_BROWSER_ENABLED", "false"
+        ).lower() in ("true", "1", "yes")
+        if not cloud_enabled:
+            return False
+
+        # Verificar se o domínio requer cloud browser
+        strategy = get_browser_strategy(url)
+        return strategy == BrowserStrategy.CLOUD
 
     async def scrape(self, message: PriceCheckMessage) -> ScrapeResult:
         """Executa navegação resiliente, screenshot e extração.
@@ -483,6 +516,8 @@ class PriceScraper:
         playwright_instance = None
         browser = None
         page: Page | None = None
+        cloud_manager: CloudBrowserManager | None = None
+        using_cloud_browser = False
 
         # Instanciar screenshotter e diagnostics para esta execução
         s3_bucket = os.environ.get(
@@ -496,53 +531,76 @@ class PriceScraper:
         diagnostics = DiagnosticsCollector(bucket=s3_bucket)
 
         try:
-            # 1. Abrir browser com viewport
-            playwright_instance = await async_playwright().start()
-            browser = await playwright_instance.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ],
+            # 1. Abrir browser — decidir entre LOCAL e CLOUD
+            using_cloud_browser = self._should_use_cloud_browser(
+                message.page_url
             )
-            logger.info("Browser Chromium inicializado (multi).")
 
-            context = await browser.new_context(
-                viewport={
-                    "width": _VIEWPORT_WIDTH,
-                    "height": _VIEWPORT_HEIGHT,
-                },
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                locale="pt-BR",
-                timezone_id="America/Sao_Paulo",
-                geolocation={
-                    "latitude": -23.5505,
-                    "longitude": -46.6333,
-                },
-                permissions=["geolocation"],
-                extra_http_headers={
-                    "Accept-Language": "pt-BR,pt;q=0.9",
-                    "X-Forwarded-For": "177.71.164.1",
-                },
-            )
-            page = await context.new_page()
+            if using_cloud_browser:
+                # === CLOUD BROWSER (Bright Data / Scrapeless) ===
+                logger.info(
+                    "Usando Cloud Browser para: %s",
+                    message.page_url,
+                )
+                cloud_manager = CloudBrowserManager(
+                    self._cloud_browser_config
+                )
+                await cloud_manager.__aenter__()
+                browser, context, page = await cloud_manager.connect(
+                    viewport_width=_VIEWPORT_WIDTH,
+                    viewport_height=_VIEWPORT_HEIGHT,
+                )
+                logger.info("Cloud Browser inicializado (multi).")
+            else:
+                # === BROWSER LOCAL (padrão) ===
+                playwright_instance = await async_playwright().start()
+                browser = await playwright_instance.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                    ],
+                )
+                logger.info("Browser Chromium local inicializado (multi).")
+
+                context = await browser.new_context(
+                    viewport={
+                        "width": _VIEWPORT_WIDTH,
+                        "height": _VIEWPORT_HEIGHT,
+                    },
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    locale="pt-BR",
+                    timezone_id="America/Sao_Paulo",
+                    geolocation={
+                        "latitude": -23.5505,
+                        "longitude": -46.6333,
+                    },
+                    permissions=["geolocation"],
+                    extra_http_headers={
+                        "Accept-Language": "pt-BR,pt;q=0.9",
+                        "X-Forwarded-For": "177.71.164.1",
+                    },
+                )
+                page = await context.new_page()
 
             # 2. Injetar cookies de geolocalização (ANTES da navegação)
-            site_config = self._get_site_config(message.page_url)
-            if site_config:
-                injection_result = await self._cookie_injector.inject_cookies(
-                    context, site_config
-                )
-                logger.info(
-                    "Cookies injetados (multi): %d cookie(s)",
-                    injection_result.cookies_count,
-                )
+            # Pular se usando cloud browser (IP já é brasileiro)
+            if not using_cloud_browser:
+                site_config = self._get_site_config(message.page_url)
+                if site_config:
+                    injection_result = await self._cookie_injector.inject_cookies(
+                        context, site_config
+                    )
+                    logger.info(
+                        "Cookies injetados (multi): %d cookie(s)",
+                        injection_result.cookies_count,
+                    )
 
             # 3. Navegar com retry automático
             nav_result = await self._retry_engine.execute(
@@ -721,21 +779,27 @@ class PriceScraper:
                 failure_reason=f"Erro inesperado: {str(e)}",
             )
         finally:
-            if page:
+            if using_cloud_browser and cloud_manager:
                 try:
-                    await page.close()
+                    await cloud_manager.__aexit__(None, None, None)
                 except Exception:
                     pass
-            if browser:
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
-            if playwright_instance:
-                try:
-                    await playwright_instance.stop()
-                except Exception:
-                    pass
+            else:
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                if browser:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+                if playwright_instance:
+                    try:
+                        await playwright_instance.stop()
+                    except Exception:
+                        pass
 
     async def _fill_vivo_cep(self, page: Page) -> None:
         """Seta localização São Paulo no site da Vivo via cookie/localStorage.
@@ -1021,7 +1085,8 @@ class PriceScraper:
         """Resize screenshot para limites do Bedrock.
 
         - Se > 8000px em qualquer dimensão → redimensiona proporcionalmente
-        - Se > 4.5MB → converte para JPEG quality 80
+        - Se > 5MB → converte para JPEG com quality decrescente até caber
+        - Limite Bedrock: 5242880 bytes (5MB)
 
         Args:
             image_bytes: Bytes do screenshot PNG.
@@ -1034,7 +1099,6 @@ class PriceScraper:
 
             img = Image.open(BytesIO(image_bytes))
             width, height = img.size
-            resized = False
 
             # Redimensionar se excede 8000px
             if width > _MAX_IMAGE_DIMENSION or height > _MAX_IMAGE_DIMENSION:
@@ -1045,7 +1109,6 @@ class PriceScraper:
                 new_width = int(width * ratio)
                 new_height = int(height * ratio)
                 img = img.resize((new_width, new_height), Image.LANCZOS)
-                resized = True
                 logger.info(
                     "Imagem redimensionada de %dx%d para %dx%d",
                     width, height, new_width, new_height,
@@ -1056,20 +1119,37 @@ class PriceScraper:
             img.save(buffer, format="PNG")
             result = buffer.getvalue()
 
-            # Se ainda > 4.5MB, converter para JPEG quality 80
+            # Se > 4.5MB, converter para JPEG com quality decrescente
             if len(result) > _MAX_IMAGE_SIZE_BYTES:
-                buffer = BytesIO()
                 if img.mode == "RGBA":
                     img = img.convert("RGB")
-                img.save(buffer, format="JPEG", quality=80)
-                result = buffer.getvalue()
-                logger.info(
-                    "Imagem convertida para JPEG: %d bytes", len(result)
-                )
 
-            if resized:
-                return result
-            return image_bytes
+                # Tentar qualidades decrescentes até caber
+                for quality in (80, 60, 45, 30):
+                    buffer = BytesIO()
+                    img.save(buffer, format="JPEG", quality=quality)
+                    result = buffer.getvalue()
+                    if len(result) <= _MAX_IMAGE_SIZE_BYTES:
+                        logger.info(
+                            "Imagem convertida para JPEG q=%d: %d bytes",
+                            quality, len(result),
+                        )
+                        break
+                else:
+                    # Se ainda não coube, reduzir dimensão pela metade
+                    w, h = img.size
+                    img = img.resize(
+                        (w // 2, h // 2), Image.LANCZOS
+                    )
+                    buffer = BytesIO()
+                    img.save(buffer, format="JPEG", quality=60)
+                    result = buffer.getvalue()
+                    logger.info(
+                        "Imagem reduzida 50%% + JPEG q=60: %d bytes",
+                        len(result),
+                    )
+
+            return result
 
         except ImportError:
             logger.warning("Pillow não disponível, sem resize")

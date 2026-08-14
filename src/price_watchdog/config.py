@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     alert_drop_threshold: float = 5.0
     alert_increase_threshold: float = 10.0
 
+    # Cloud Browser (Scraping Browser Cloud — Bright Data / Scrapeless)
+    cloud_browser_provider: str = "bright_data"
+    cloud_browser_username: str = ""
+    cloud_browser_password: str = ""
+    cloud_browser_endpoint: str = ""  # Override WSS URL completo (opcional)
+    cloud_browser_country: str = "br"
+    cloud_browser_timeout_ms: int = 120_000
+    cloud_browser_enabled: bool = False  # Feature flag global
+
     @property
     def recipients_list(self) -> list[str]:
         """Retorna lista de destinatários a partir da string comma-separated."""
