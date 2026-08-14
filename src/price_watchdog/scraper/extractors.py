@@ -479,9 +479,11 @@ class AIExtractor(BaseExtractor):
         # Incluir texto da página como contexto adicional
         if page_text:
             prompt += (
-                "\n\n--- TEXTO EXTRAÍDO DA PÁGINA (contexto "
-                "adicional caso os preços não sejam visíveis no "
-                "screenshot) ---\n"
+                "\n\n--- TEXTO EXTRAÍDO DA PÁGINA ---\n"
+                "IMPORTANTE: Se o screenshot estiver escuro, incompleto "
+                "ou difícil de ler, USE O TEXTO ABAIXO como fonte "
+                "primária para extrair planos e preços. O texto contém "
+                "todo o conteúdo visível da página:\n\n"
                 f"{page_text}"
             )
 
@@ -702,6 +704,9 @@ class AIExtractor(BaseExtractor):
     ) -> bytes:
         """Redimensiona imagem se exceder limites do Bedrock.
 
+        Bedrock aceita no máximo 5242880 bytes (5MB) e 8000px.
+        Usa quality decrescente e resize progressivo se necessário.
+
         Args:
             image_bytes: Bytes da imagem PNG.
             max_dimension: Dimensão máxima permitida.
@@ -713,23 +718,12 @@ class AIExtractor(BaseExtractor):
             from io import BytesIO
             from PIL import Image
 
+            MAX_BYTES = 5_000_000  # 5MB (margem de segurança)
+
             img = Image.open(BytesIO(image_bytes))
             width, height = img.size
 
-            if width <= max_dimension and height <= max_dimension:
-                # Checar tamanho do arquivo (Bedrock max = 5MB)
-                if len(image_bytes) <= 5_000_000:
-                    return image_bytes
-                # Dimensões OK mas arquivo muito grande → converter para JPEG
-                buffer = BytesIO()
-                if img.mode == "RGBA":
-                    img = img.convert("RGB")
-                img.save(buffer, format="JPEG", quality=75)
-                result = buffer.getvalue()
-                logger.info("Convertido para JPEG (size): %d bytes", len(result))
-                return result
-
-            # Redimensionar se necessário
+            # Redimensionar se excede dimensão máxima
             if width > max_dimension or height > max_dimension:
                 scale = min(max_dimension / width, max_dimension / height)
                 new_width = int(width * scale)
@@ -740,21 +734,41 @@ class AIExtractor(BaseExtractor):
                     width, height, new_width, new_height,
                 )
 
-            # Salvar como PNG
+            # Salvar como PNG e verificar tamanho
             buffer = BytesIO()
             img.save(buffer, format="PNG")
             result = buffer.getvalue()
 
-            # Se > 5MB, converter para JPEG
-            if len(result) > 5_000_000:
-                buffer = BytesIO()
-                if img.mode == "RGBA":
-                    img = img.convert("RGB")
-                img.save(buffer, format="JPEG", quality=80)
-                result = buffer.getvalue()
-                logger.info("Convertido para JPEG: %d bytes", len(result))
+            if len(result) <= MAX_BYTES:
+                return result
 
+            # PNG muito grande → converter para JPEG com quality decrescente
+            if img.mode == "RGBA":
+                img = img.convert("RGB")
+
+            for quality in (80, 60, 45, 30):
+                buffer = BytesIO()
+                img.save(buffer, format="JPEG", quality=quality)
+                result = buffer.getvalue()
+                if len(result) <= MAX_BYTES:
+                    logger.info(
+                        "Convertido para JPEG q=%d: %d bytes",
+                        quality, len(result),
+                    )
+                    return result
+
+            # Se ainda não coube, reduzir dimensão pela metade
+            w, h = img.size
+            img = img.resize((w // 2, h // 2), Image.LANCZOS)
+            buffer = BytesIO()
+            img.save(buffer, format="JPEG", quality=60)
+            result = buffer.getvalue()
+            logger.info(
+                "Imagem reduzida 50%% + JPEG q=60: %d bytes",
+                len(result),
+            )
             return result
+
         except ImportError:
             logger.warning("Pillow não disponível")
             return image_bytes

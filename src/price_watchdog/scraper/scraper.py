@@ -1021,23 +1021,31 @@ class PriceScraper:
                 )
 
             # Estratégia 2: Clicar em aria-expanded="false"
-            # APENAS em elementos que parecem FAQ/accordion
-            # (evita botões de navegação, "Saiba mais", etc.)
+            # Inclui botões dentro de seções FAQ (Netflix, etc.)
             aria_buttons = await page.query_selector_all(
                 "[aria-expanded='false'][class*='accord'], "
                 "[aria-expanded='false'][class*='faq'], "
                 "[aria-expanded='false'][class*='question'], "
                 "[aria-expanded='false'][class*='collapse'], "
                 "[aria-expanded='false'][role='button']"
-                "[aria-controls]"
+                "[aria-controls], "
+                "button[aria-expanded='false']"
             )
             aria_count = 0
-            for btn in aria_buttons[:10]:  # Max 10
+            for btn in aria_buttons[:15]:  # Max 15
                 try:
+                    # Verificar se é botão de FAQ (não navegação)
+                    text = await btn.inner_text()
+                    # Pular botões de nav/menu (curtos demais ou genéricos)
+                    if len(text.strip()) < 5 or text.strip().lower() in (
+                        "menu", "fechar", "abrir", "ver mais",
+                        "saiba mais", "mostrar",
+                    ):
+                        continue
                     # Timeout curto: 2s por click
                     await btn.click(timeout=2000)
                     aria_count += 1
-                    await page.wait_for_timeout(200)
+                    await page.wait_for_timeout(300)
                 except Exception:
                     pass  # Skip se travar
             if aria_count > 0:
