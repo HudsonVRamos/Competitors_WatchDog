@@ -59,6 +59,7 @@ from scraping_resilience.structured_logger import (
 
 # Competitor-specific flows
 from scraping_resilience.competitor_flows.giga_fibra import GigaFibraFlow
+from scraping_resilience.competitor_flows.globoplay import GloboplayFlow
 from scraping_resilience.competitor_flows.vivo_tv import VivoTVFlow
 
 logger = logging.getLogger(__name__)
@@ -684,6 +685,8 @@ class PriceScraper:
 
             # 7. Interação específica por concorrente
             vivo_accumulated_text: str = ""
+            globoplay_text: str = ""
+
             if "vivo.com.br" in message.page_url:
                 await self._fill_vivo_cep(page)
                 vivo_flow = VivoTVFlow(self._wait_manager, screenshotter)
@@ -698,6 +701,12 @@ class PriceScraper:
                 )
                 await giga_flow.execute(context, page)
 
+            if "globoplay.globo.com" in message.page_url:
+                globo_flow = GloboplayFlow(
+                    self._wait_manager, screenshotter
+                )
+                globoplay_text = await globo_flow.execute(page)
+
             # 8. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
 
@@ -709,7 +718,7 @@ class PriceScraper:
             await self._wait_manager.wait_for_page_ready(page)
 
             # 9.5 Wait extra para SPAs que demoram a renderizar preços
-            if site_key in ("sky", "globoplay"):
+            if site_key == "sky":
                 import asyncio as _asyncio
                 await _asyncio.sleep(5)
                 logger.info("Wait extra (5s) para SPA: %s", site_key)
@@ -719,9 +728,13 @@ class PriceScraper:
 
             # 10. Usar AIExtractor.extract_all
             extractor = AIExtractor()
+
+            # Combinar texto extra de flows específicos
+            extra_text = vivo_accumulated_text or globoplay_text or ""
+
             result = await extractor.extract_all(
                 page, message.competitor_name,
-                extra_text=vivo_accumulated_text,
+                extra_text=extra_text,
             )
 
             # Calcular tempo e log estruturado

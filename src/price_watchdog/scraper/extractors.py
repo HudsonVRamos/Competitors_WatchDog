@@ -472,6 +472,11 @@ class AIExtractor(BaseExtractor):
             '"has_mobile": false, "mobile_speed_mbps": null, '
             '"streamings": ["Netflix"], "extras": "YouTube Premium 3 meses"}, ...]}'
             "\n\nUse null para campos não visíveis/não aplicáveis."
+            "\n\nSe encontrar apenas um preço mínimo/máximo (ex: 'planos a "
+            "partir de R$20,90' ou 'de R$20,90 a R$59,90'), crie entradas "
+            "para cada preço mencionado. Ex: se diz 'R$20,90 a R$59,90', "
+            "crie pelo menos: {name:'Plano Básico', price:20.90} e "
+            "{name:'Plano Premium', price:59.90}."
             "\n\nSe não encontrar nenhum plano/preço, retorne: "
             '{"plans": []}'
         )
