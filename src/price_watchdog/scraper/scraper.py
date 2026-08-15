@@ -234,7 +234,6 @@ class PriceScraper:
                 permissions=["geolocation"],
                 extra_http_headers={
                     "Accept-Language": "pt-BR,pt;q=0.9",
-                    "X-Forwarded-For": "177.71.164.1",
                 },
             )
             page = await context.new_page()
@@ -590,7 +589,6 @@ class PriceScraper:
                     permissions=["geolocation"],
                     extra_http_headers={
                         "Accept-Language": "pt-BR,pt;q=0.9",
-                        "X-Forwarded-For": "177.71.164.1",
                     },
                 )
                 page = await context.new_page()
