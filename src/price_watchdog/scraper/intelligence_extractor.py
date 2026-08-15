@@ -725,6 +725,9 @@ Agora analise o screenshot fornecido e extraia as informações seguindo rigoros
         MAX_BYTES = 3_800_000  # ~3.8MB raw → ~5MB em base64
 
         if len(image_bytes) <= MAX_BYTES:
+            # Detectar formato real pelos magic bytes
+            if image_bytes[:2] == b'\xff\xd8':
+                return image_bytes, "image/jpeg"
             return image_bytes, "image/png"
 
         try:
