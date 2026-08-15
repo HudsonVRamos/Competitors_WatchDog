@@ -555,14 +555,19 @@ class PriceScraper:
             else:
                 # === BROWSER LOCAL (padrão) ===
                 playwright_instance = await async_playwright().start()
+
+                # Args anti-detect para SPAs que bloqueiam headless
+                launch_args = [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                ]
+
                 browser = await playwright_instance.chromium.launch(
                     headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                    ],
+                    args=launch_args,
                 )
                 logger.info("Browser Chromium local inicializado (multi).")
 
@@ -593,17 +598,32 @@ class PriceScraper:
             # 1.5 Stealth: remover sinais de automação para SPAs (Globoplay)
             if "globoplay.globo.com" in message.page_url:
                 await context.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', {
-                        get: () => undefined,
+                    // Tentar remover webdriver (se configurável)
+                    try {
+                        Object.defineProperty(navigator, 'webdriver', {
+                            get: () => undefined,
+                        });
+                    } catch(e) {}
+                    // Chrome runtime
+                    if (!window.chrome) {
+                        window.chrome = { runtime: {} };
+                    }
+                    // Permissions override
+                    try {
+                        const originalQuery = window.navigator.permissions.query;
+                        window.navigator.permissions.query = (parameters) =>
+                            parameters.name === 'notifications'
+                                ? Promise.resolve({ state: Notification.permission })
+                                : originalQuery(parameters);
+                    } catch(e) {}
+                    // Plugins
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5],
                     });
-                    // Chrome devtools detection
-                    window.chrome = { runtime: {} };
-                    // Permissions
-                    const originalQuery = window.navigator.permissions.query;
-                    window.navigator.permissions.query = (parameters) =>
-                        parameters.name === 'notifications'
-                            ? Promise.resolve({ state: Notification.permission })
-                            : originalQuery(parameters);
+                    // Languages
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['pt-BR', 'pt', 'en-US', 'en'],
+                    });
                 """)
 
             # 2. Injetar cookies de geolocalização (ANTES da navegação)
@@ -722,41 +742,6 @@ class PriceScraper:
                     self._wait_manager, screenshotter
                 )
                 globoplay_text = await globo_flow.execute(page)
-
-                # Se o flow não encontrou R$ (anti-headless block),
-                # tentar injetar stealth script e recarregar
-                if "R$" not in globoplay_text:
-                    logger.warning(
-                        "Globoplay: texto vazio, tentando stealth bypass"
-                    )
-                    # Injetar override do navigator.webdriver
-                    await page.evaluate("""
-                        () => {
-                            Object.defineProperty(navigator, 'webdriver', {
-                                get: () => false,
-                            });
-                            // Remover sinais de automação
-                            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
-                            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
-                            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
-                        }
-                    """)
-                    await page.reload(timeout=30_000)
-                    import asyncio as _aio
-                    await _aio.sleep(10)
-                    try:
-                        globoplay_text = await page.inner_text("body")
-                    except Exception:
-                        globoplay_text = ""
-                    if "R$" in globoplay_text:
-                        logger.info(
-                            "Globoplay: stealth bypass OK, texto com R$"
-                        )
-                    else:
-                        logger.warning(
-                            "Globoplay: stealth bypass sem efeito (%d chars)",
-                            len(globoplay_text),
-                        )
 
             # 8. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
