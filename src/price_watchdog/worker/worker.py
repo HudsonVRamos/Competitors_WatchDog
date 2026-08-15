@@ -289,7 +289,15 @@ class Worker:
             # Para cada plano encontrado, criar PriceRecord
             for plan in multi_result.plans:
                 plan_name = plan["name"]
-                plan_price = plan["price"]
+                plan_price = plan.get("price")
+
+                # Pular planos sem preço extraído
+                if plan_price is None:
+                    logger.warning(
+                        "Plano '%s' sem preço - pulando",
+                        plan_name,
+                    )
+                    continue
 
                 # Buscar config correspondente (fuzzy match)
                 matched_config = self._match_config(
@@ -311,7 +319,7 @@ class Worker:
                     our_price = plan_price  # Sem referência ainda
 
                 # Comparar preços (pular se our_price indisponível)
-                if our_price and our_price > 0:
+                if our_price and our_price > 0 and plan_price:
                     comparison = self._comparator.compare(
                         plan_price, our_price
                     )
