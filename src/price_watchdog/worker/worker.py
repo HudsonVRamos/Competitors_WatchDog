@@ -310,23 +310,25 @@ class Worker:
                     config_id = str(new_config.id)
                     our_price = plan_price  # Sem referência ainda
 
-                # Comparar preços
-                comparison = self._comparator.compare(
-                    plan_price, our_price
-                )
+                # Comparar preços (pular se our_price indisponível)
+                if our_price and our_price > 0:
+                    comparison = self._comparator.compare(
+                        plan_price, our_price
+                    )
+                    price_diff = comparison.absolute_difference
+                    price_diff_pct = comparison.percentage_difference
+                else:
+                    price_diff = None
+                    price_diff_pct = None
 
                 record = PriceRecord(
                     product_config_id=config_id,
                     competitor_id=message.competitor_id,
                     cycle_id=message.cycle_id,
                     extracted_price=plan_price,
-                    our_price=our_price,
-                    price_difference=(
-                        comparison.absolute_difference
-                    ),
-                    price_difference_pct=(
-                        comparison.percentage_difference
-                    ),
+                    our_price=our_price or plan_price,
+                    price_difference=price_diff,
+                    price_difference_pct=price_diff_pct,
                     extraction_status="success",
                     failure_reason=None,
                     screenshot_s3_key=screenshot_s3_key,
