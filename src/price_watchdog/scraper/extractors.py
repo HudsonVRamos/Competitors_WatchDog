@@ -761,7 +761,7 @@ class AIExtractor(BaseExtractor):
             from io import BytesIO
             from PIL import Image
 
-            MAX_BYTES = 5_000_000  # 5MB (margem de segurança)
+            MAX_BYTES = 3_800_000  # ~3.8MB raw → ~5MB em base64
 
             img = Image.open(BytesIO(image_bytes))
             width, height = img.size

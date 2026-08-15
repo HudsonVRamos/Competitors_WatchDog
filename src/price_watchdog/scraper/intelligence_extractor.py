@@ -707,6 +707,84 @@ Agora analise o screenshot fornecido e extraia as informações seguindo rigoros
         # Default: considerar retentável para erros desconhecidos
         return "retryable"
 
+    def _compress_image_if_needed(
+        self, image_bytes: bytes
+    ) -> tuple[bytes, str]:
+        """Comprime imagem se exceder limite de 5MB do Bedrock.
+
+        Bedrock aceita no máximo 5242880 bytes (5MB).
+        Usa conversão para JPEG com quality decrescente e resize
+        progressivo se necessário.
+
+        Args:
+            image_bytes: Bytes da imagem PNG/JPEG.
+
+        Returns:
+            Tupla (bytes comprimidos, media_type).
+        """
+        MAX_BYTES = 3_800_000  # ~3.8MB raw → ~5MB em base64
+
+        if len(image_bytes) <= MAX_BYTES:
+            return image_bytes, "image/png"
+
+        try:
+            from io import BytesIO
+            from PIL import Image
+
+            img = Image.open(BytesIO(image_bytes))
+            width, height = img.size
+
+            # Redimensionar se excede 8000px em alguma dimensão
+            max_dim = 8000
+            if width > max_dim or height > max_dim:
+                scale = min(max_dim / width, max_dim / height)
+                img = img.resize(
+                    (int(width * scale), int(height * scale)),
+                    Image.LANCZOS,
+                )
+                logger.info(
+                    "Imagem redimensionada: %dx%d -> %dx%d",
+                    width, height, img.size[0], img.size[1],
+                )
+
+            # Converter para RGB (JPEG não suporta RGBA)
+            if img.mode == "RGBA":
+                img = img.convert("RGB")
+
+            # Tentar JPEG com quality decrescente
+            for quality in (85, 70, 55, 40, 25):
+                buffer = BytesIO()
+                img.save(buffer, format="JPEG", quality=quality)
+                result = buffer.getvalue()
+                if len(result) <= MAX_BYTES:
+                    logger.info(
+                        "Imagem comprimida para JPEG q=%d: "
+                        "%d bytes (original: %d bytes)",
+                        quality, len(result), len(image_bytes),
+                    )
+                    return result, "image/jpeg"
+
+            # Último recurso: reduzir dimensão pela metade
+            w, h = img.size
+            img = img.resize((w // 2, h // 2), Image.LANCZOS)
+            buffer = BytesIO()
+            img.save(buffer, format="JPEG", quality=60)
+            result = buffer.getvalue()
+            logger.info(
+                "Imagem reduzida 50%% + JPEG q=60: %d bytes",
+                len(result),
+            )
+            return result, "image/jpeg"
+
+        except ImportError:
+            logger.warning(
+                "Pillow não disponível para compressão"
+            )
+            return image_bytes, "image/png"
+        except Exception as e:
+            logger.warning("Falha ao comprimir imagem: %s", e)
+            return image_bytes, "image/png"
+
     async def _invoke_bedrock(
         self,
         screenshot_bytes: bytes,
@@ -721,6 +799,7 @@ Agora analise o screenshot fornecido e extraia as informações seguindo rigoros
         - Retry para erros de schema (até 2 tentativas adicionais
           com feedback do erro no prompt)
         - Timeout global de 120s com abort e cancelamento
+        - Compressão automática de imagens > 4.5MB
 
         Classificação de erros:
         - Retentável: HTTP 5xx, HTTP 429, timeout, ConnectionError
@@ -741,8 +820,13 @@ Agora analise o screenshot fornecido e extraia as informações seguindo rigoros
                 esgotamento de retries.
             SchemaValidationError: Se schema retry esgotado.
         """
+        # Comprimir imagem se exceder limite do Bedrock
+        compressed_bytes, media_type = (
+            self._compress_image_if_needed(screenshot_bytes)
+        )
+
         image_base64 = base64.b64encode(
-            screenshot_bytes
+            compressed_bytes
         ).decode("utf-8")
 
         current_prompt = prompt
@@ -759,7 +843,8 @@ Agora analise o screenshot fornecido e extraia as informações seguindo rigoros
                     # Chamar Bedrock
                     response_data = (
                         await self._call_bedrock_api(
-                            image_base64, current_prompt
+                            image_base64, current_prompt,
+                            media_type,
                         )
                     )
 
@@ -860,6 +945,7 @@ Agora analise o screenshot fornecido e extraia as informações seguindo rigoros
         self,
         image_base64: str,
         prompt: str,
+        media_type: str = "image/png",
     ) -> dict:
         """Realiza chamada HTTP ao Bedrock invoke_model.
 
@@ -869,6 +955,7 @@ Agora analise o screenshot fornecido e extraia as informações seguindo rigoros
         Args:
             image_base64: Imagem codificada em base64.
             prompt: Texto do prompt a enviar.
+            media_type: Tipo MIME da imagem (image/png ou image/jpeg).
 
         Returns:
             Dicionário JSON da resposta do Bedrock.
@@ -884,7 +971,7 @@ Agora analise o screenshot fornecido e extraia as informações seguindo rigoros
                             "type": "image",
                             "source": {
                                 "type": "base64",
-                                "media_type": "image/png",
+                                "media_type": media_type,
                                 "data": image_base64,
                             },
                         },
