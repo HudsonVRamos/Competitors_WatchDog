@@ -458,6 +458,7 @@ class AIExtractor(BaseExtractor):
         image_base64 = base64.b64encode(
             screenshot_bytes
         ).decode("utf-8")
+        image_media_type = self._detect_media_type(screenshot_bytes)
 
         prompt = (
             "Analise esta screenshot e o texto abaixo de uma página web de um "
@@ -541,7 +542,7 @@ class AIExtractor(BaseExtractor):
                             "type": "image",
                             "source": {
                                 "type": "base64",
-                                "media_type": "image/png",
+                                "media_type": image_media_type,
                                 "data": image_base64,
                             },
                         },
@@ -742,6 +743,20 @@ class AIExtractor(BaseExtractor):
                 ),
             )
 
+    @staticmethod
+    def _detect_media_type(image_bytes: bytes) -> str:
+        """Detecta o media type de uma imagem pelos magic bytes.
+
+        Args:
+            image_bytes: Bytes da imagem.
+
+        Returns:
+            'image/jpeg' ou 'image/png'.
+        """
+        if image_bytes[:2] == b'\xff\xd8':
+            return "image/jpeg"
+        return "image/png"
+
     def _resize_image_if_needed(
         self, image_bytes: bytes, max_dimension: int = 8000
     ) -> bytes:
@@ -874,6 +889,7 @@ class AIExtractor(BaseExtractor):
             ExtractionResult parseado da resposta do Bedrock.
         """
         image_base64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+        image_media_type = self._detect_media_type(screenshot_bytes)
 
         prompt = (
             f"Analise esta screenshot de uma página web brasileira e identifique o preço "
@@ -903,7 +919,7 @@ class AIExtractor(BaseExtractor):
                             "type": "image",
                             "source": {
                                 "type": "base64",
-                                "media_type": "image/png",
+                                "media_type": image_media_type,
                                 "data": image_base64,
                             },
                         },
