@@ -137,33 +137,100 @@ class SkyMaisFlow:
                     await streaming_tab.first.click(timeout=3000)
                     await page.wait_for_timeout(1500)
 
-                    # Capturar texto da modal (contém os streamings)
-                    modal_text = await page.evaluate("""
+                    # Extrair nome do plano da modal
+                    plan_name = await page.evaluate("""
                         () => {
-                            // Buscar modal/dialog aberto
-                            const modals = document.querySelectorAll(
-                                '[class*="modal"], [class*="Modal"], '
-                                + '[role="dialog"], [class*="popup"], '
-                                + '[class*="Popup"], [class*="overlay"]'
+                            // Buscar título do plano na modal
+                            const headings = document.querySelectorAll(
+                                'h1, h2, h3, [class*="title"], '
+                                + '[class*="Title"], [class*="heading"]'
                             );
-                            for (const m of modals) {
-                                const text = m.innerText;
-                                if (text.includes('Streaming') && text.length > 50) {
+                            for (const h of headings) {
+                                const text = h.innerText.trim();
+                                if (text.includes('Plano') && text.length < 50) {
                                     return text;
                                 }
                             }
-                            // Fallback: pegar tudo visível
-                            return document.body.innerText;
+                            return 'Plano desconhecido';
                         }
                     """)
 
-                    if modal_text:
-                        plan_streamings.append(modal_text)
-                        logger.info(
-                            "SkyMaisFlow: capturado texto da modal "
-                            "(%d chars) para plano %d",
-                            len(modal_text), i + 1,
+                    # Extrair nomes dos streamings
+                    streaming_names = await page.evaluate("""
+                        () => {
+                            // Buscar textos dos streamings na aba ativa
+                            const names = [];
+                            const items = document.querySelectorAll(
+                                '[class*="streaming"] span, '
+                                + '[class*="streaming"] p, '
+                                + '[class*="Streaming"] span, '
+                                + '[class*="service"] span'
+                            );
+                            for (const item of items) {
+                                const t = item.innerText.trim();
+                                if (t && t.length > 2 && t.length < 30
+                                    && !t.includes('Streaming')
+                                    && !t.includes('Destacado')) {
+                                    names.push(t);
+                                }
+                            }
+                            if (names.length === 0) {
+                                // Fallback: pegar texto da seção ativa
+                                const body = document.body.innerText;
+                                const services = [
+                                    'Amazon Prime', 'Disney+',
+                                    'HBO Max', 'Paramount+',
+                                    'Premiere', 'Sportynet+',
+                                    'SportyNet+', 'Telecine',
+                                    'Netflix', 'Globoplay',
+                                    'Apple TV+', 'Star+'
+                                ];
+                                for (const s of services) {
+                                    if (body.includes(s)) names.push(s);
+                                }
+                            }
+                            return names;
+                        }
+                    """)
+
+                    if streaming_names:
+                        entry = (
+                            f"PLANO: {plan_name}\n"
+                            f"STREAMINGS INCLUSOS: "
+                            f"{', '.join(streaming_names)}"
                         )
+                        plan_streamings.append(entry)
+                        logger.info(
+                            "SkyMaisFlow: plano '%s' -> %d streamings: %s",
+                            plan_name, len(streaming_names),
+                            ", ".join(streaming_names),
+                        )
+                    else:
+                        # Fallback: texto completo da modal
+                        modal_text = await page.evaluate("""
+                            () => {
+                                const modals = document.querySelectorAll(
+                                    '[class*="modal"], [class*="Modal"], '
+                                    + '[role="dialog"]'
+                                );
+                                for (const m of modals) {
+                                    const text = m.innerText;
+                                    if (text.includes('Streaming')) {
+                                        return text;
+                                    }
+                                }
+                                return '';
+                            }
+                        """)
+                        if modal_text:
+                            plan_streamings.append(
+                                f"PLANO: {plan_name}\n{modal_text}"
+                            )
+                            logger.info(
+                                "SkyMaisFlow: capturado texto da modal "
+                                "(%d chars) para plano %d",
+                                len(modal_text), i + 1,
+                            )
 
                 # Fechar modal (botão X ou Escape)
                 close_btn = page.locator(
