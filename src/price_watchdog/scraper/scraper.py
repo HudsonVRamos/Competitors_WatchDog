@@ -741,6 +741,16 @@ class PriceScraper:
                 )
                 globoplay_text = await globo_flow.execute(page)
 
+            skymais_text: str = ""
+            if "skymais.com.br" in message.page_url:
+                from scraping_resilience.competitor_flows.skymais import (
+                    SkyMaisFlow,
+                )
+                sky_flow = SkyMaisFlow(
+                    self._wait_manager, screenshotter
+                )
+                skymais_text = await sky_flow.execute(page)
+
             # 8. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
 
@@ -764,7 +774,10 @@ class PriceScraper:
             extractor = AIExtractor()
 
             # Combinar texto extra de flows específicos
-            extra_text = vivo_accumulated_text or globoplay_text or ""
+            extra_text = (
+                vivo_accumulated_text or globoplay_text
+                or skymais_text or ""
+            )
 
             result = await extractor.extract_all(
                 page, message.competitor_name,
