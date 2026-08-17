@@ -117,9 +117,17 @@ class SkyMaisFlow:
 
         for i in range(count):
             try:
+                # Re-buscar os links a cada iteração (DOM pode mudar)
+                details_links = page.get_by_text(
+                    "Detalhes do plano", exact=False
+                )
+                current_count = await details_links.count()
+                if i >= current_count:
+                    break
+
                 # Clicar em "Detalhes do plano"
                 await details_links.nth(i).click(timeout=5000)
-                await page.wait_for_timeout(1500)
+                await page.wait_for_timeout(2000)
 
                 # Clicar na aba "Streamings"
                 streaming_tab = page.get_by_text(
@@ -166,7 +174,11 @@ class SkyMaisFlow:
                     await close_btn.first.click(timeout=2000)
                 else:
                     await page.keyboard.press("Escape")
-                await page.wait_for_timeout(1000)
+                await page.wait_for_timeout(1500)
+
+                # Scroll de volta ao topo para encontrar próximo link
+                await page.evaluate("window.scrollTo(0, 0)")
+                await page.wait_for_timeout(500)
 
             except Exception as e:
                 logger.debug(
