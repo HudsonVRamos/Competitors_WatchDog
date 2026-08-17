@@ -797,6 +797,18 @@ class Worker:
                     bundled_streaming_3=(
                         streamings[2] if len(streamings) > 2 else None
                     ),
+                    bundled_streaming_4=(
+                        streamings[3] if len(streamings) > 3 else None
+                    ),
+                    bundled_streaming_5=(
+                        streamings[4] if len(streamings) > 4 else None
+                    ),
+                    bundled_streaming_6=(
+                        streamings[5] if len(streamings) > 5 else None
+                    ),
+                    bundled_streaming_7=(
+                        streamings[6] if len(streamings) > 6 else None
+                    ),
                 )
                 record.packages.append(pkg)
 
@@ -973,6 +985,22 @@ class Worker:
                         ),
                         bundled_streaming_3=(
                             streamings[2] if len(streamings) > 2
+                            else None
+                        ),
+                        bundled_streaming_4=(
+                            streamings[3] if len(streamings) > 3
+                            else None
+                        ),
+                        bundled_streaming_5=(
+                            streamings[4] if len(streamings) > 4
+                            else None
+                        ),
+                        bundled_streaming_6=(
+                            streamings[5] if len(streamings) > 5
+                            else None
+                        ),
+                        bundled_streaming_7=(
+                            streamings[6] if len(streamings) > 6
                             else None
                         ),
                     )

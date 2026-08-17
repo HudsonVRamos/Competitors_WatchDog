@@ -82,6 +82,10 @@ class PackageComposition(Base):
     bundled_streaming_1 = Column(String(100), nullable=True)
     bundled_streaming_2 = Column(String(100), nullable=True)
     bundled_streaming_3 = Column(String(100), nullable=True)
+    bundled_streaming_4 = Column(String(100), nullable=True)
+    bundled_streaming_5 = Column(String(100), nullable=True)
+    bundled_streaming_6 = Column(String(100), nullable=True)
+    bundled_streaming_7 = Column(String(100), nullable=True)
 
     # Relationship
     intelligence_record = relationship(

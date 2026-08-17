@@ -383,7 +383,7 @@ A resposta deve conter exatamente dois objetos de topo:
       "fiber_speed_mbps": "int | null — Velocidade da fibra em Mbps, inteiro >= 0",
       "has_mobile_internet": "bool | null — Se o pacote inclui internet móvel 4G/5G (true/false)",
       "mobile_speed_mbps": "int | null — Velocidade da internet móvel em Mbps, inteiro >= 0",
-      "bundled_streamings": "list[string] — Lista com até 3 nomes de serviços de streaming incluídos no pacote (ex: Netflix, Disney+, Paramount+). Usar apenas o nome-base sem sufixos de plano (Basic, Premium, Standard). Lista vazia se nenhum streaming incluído"
+      "bundled_streamings": "list[string] — Lista com TODOS os nomes de serviços de streaming incluídos no pacote (ex: Netflix, Disney+, Paramount+, Globoplay, HBO Max, Apple TV+, Amazon Prime Video, ESPN, Telecine, Premiere, Star+). Listar TODOS sem limite. Usar apenas o nome-base sem sufixos de plano. Lista vazia se nenhum streaming incluído"
     }}
   ],
   "commercial_communication": {{
@@ -398,10 +398,12 @@ A resposta deve conter exatamente dois objetos de topo:
 1. Use null para qualquer campo cujo valor não possa ser identificado na página
 2. Liste até 20 pacotes em "package_composition" (os mais relevantes primeiro)
 3. Para "commercial_keywords": extraia de 3 a 15 palavras-chave. Se não identificar ao menos 3, retorne lista vazia []
-4. Para "bundled_streamings": liste até 3 serviços de streaming por pacote, na ordem de aparição na página (de cima para baixo, esquerda para direita). Use apenas o nome-base do serviço (ex: "Netflix" e não "Netflix Premium")
+4. Para "bundled_streamings": liste TODOS os serviços de streaming incluídos em cada pacote (sem limite de quantidade), na ordem de aparição na página. Use apenas o nome-base do serviço (ex: "Netflix" e não "Netflix Premium"). Exemplos de streamings: Netflix, Disney+, Globoplay, HBO Max, Amazon Prime Video, Apple TV+, Paramount+, Star+, ESPN, Telecine, Premiere, Starzplay, Discovery+
 5. O campo "plan_name" é obrigatório — se não identificar o nome do plano, use uma descrição identificadora baseada no conteúdo visível
-6. Preços devem ser numéricos (sem símbolo R$), usando ponto como separador decimal (ex: 99.90)
+6. Preços devem ser numéricos (sem símbolo R$), usando ponto como separador decimal. SEMPRE incluir casas decimais (ex: 99.90, 20.00, 149.00). Se o preço aparece como "R$ 20" ou "R$20", registrar como 20.00
 7. Se a página não contiver nenhum pacote identificável, retorne "package_composition" como lista vazia []
+8. EXTRAIR TODOS os planos/pacotes visíveis na página — não omitir nenhum. Se há planos com diferentes tiers (Básico, Padrão, Premium), listar CADA UM separadamente
+9. Para cada plano que inclua streamings, verificar CUIDADOSAMENTE todos os logos/ícones de streaming visíveis e listar TODOS eles
 
 ## Exemplo de Resposta (few-shot)
 
@@ -418,7 +420,7 @@ A resposta deve conter exatamente dois objetos de topo:
       "fiber_speed_mbps": 600,
       "has_mobile_internet": true,
       "mobile_speed_mbps": 50,
-      "bundled_streamings": ["Netflix", "Disney+", "Globoplay"]
+      "bundled_streamings": ["Netflix", "Disney+", "Globoplay", "HBO Max", "Paramount+"]
     }},
     {{
       "plan_name": "Plano Básico",
