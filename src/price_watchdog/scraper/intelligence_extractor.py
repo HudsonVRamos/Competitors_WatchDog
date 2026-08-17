@@ -404,6 +404,7 @@ A resposta deve conter exatamente dois objetos de topo:
 7. Se a página não contiver nenhum pacote identificável, retorne "package_composition" como lista vazia []
 8. EXTRAIR TODOS os planos/pacotes visíveis na página — não omitir nenhum. Se há planos com diferentes tiers (Básico, Padrão, Premium), listar CADA UM separadamente
 9. Para cada plano que inclua streamings, verificar CUIDADOSAMENTE todos os logos/ícones de streaming visíveis e listar TODOS eles
+10. IMPORTANTE sobre streamings em planos combo/base: Se um plano de TV (ex: "Plano TV", "Plano Streaming", "Plano Futebol") inclui acesso a serviços de streaming (indicado por logos, ícones ou texto na descrição do plano), esses streamings DEVEM ser listados no campo "bundled_streamings" daquele plano. Não listar streamings apenas em planos avulsos/adicionais — os planos principais também podem incluir streamings
 
 ## Exemplo de Resposta (few-shot)
 
