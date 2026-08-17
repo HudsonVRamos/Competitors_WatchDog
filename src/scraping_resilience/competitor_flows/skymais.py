@@ -54,6 +54,8 @@ class SkyMaisFlow:
         """
         logger.info("SkyMaisFlow: extraindo detalhes dos cards")
 
+        self._plan_details_text = ""
+
         # Esperar cards carregarem
         try:
             await page.wait_for_function(
@@ -66,56 +68,122 @@ class SkyMaisFlow:
         except Exception:
             pass
 
-        # Expandir detalhes — clicar em "Ver mais" ou "Detalhes"
+        # Clicar em "Detalhes do plano" e aba "Streamings" de cada card
         await self._expand_plan_details(page)
 
-        # Capturar screenshot após expansão
-        await self._screenshotter.capture(page, "skymais_expanded")
+        # Capturar screenshot após interação
+        await self._screenshotter.capture(page, "skymais_after_details")
 
-        # Extrair texto de cada seção de plano
-        plan_text = await self._extract_plan_details(page)
-
-        # Capturar texto completo como fallback
+        # Capturar texto completo da página
         full_text = await page.evaluate("document.body.innerText")
 
-        if plan_text:
+        # Combinar: texto das modais (com streamings) + texto da página
+        if self._plan_details_text:
             combined = (
-                "--- DETALHES DOS PLANOS SKY+ ---\n"
-                "IMPORTANTE: Cada plano pode incluir streamings listados "
-                "abaixo do preço. Associar TODOS os streamings ao plano "
-                "correspondente.\n\n"
-                f"{plan_text}\n\n"
-                f"--- TEXTO COMPLETO ---\n{full_text}"
+                "--- STREAMINGS POR PLANO (extraído das modais) ---\n"
+                "IMPORTANTE: Associar os streamings listados abaixo a "
+                "cada plano correspondente no campo bundled_streamings.\n\n"
+                f"{self._plan_details_text}\n\n"
+                f"--- TEXTO COMPLETO DA PÁGINA ---\n{full_text}"
             )
         else:
             combined = full_text
 
         logger.info(
             "SkyMaisFlow: texto extraído (%d chars, "
-            "detalhes=%d chars)",
+            "detalhes modais=%d chars)",
             len(combined),
-            len(plan_text),
+            len(self._plan_details_text),
         )
         return combined
 
     async def _expand_plan_details(self, page: Page) -> None:
-        """Expande detalhes/ver mais dos planos."""
-        try:
-            # Clicar em botões "Ver mais", "Detalhes", etc.
-            for text in ["Ver mais", "Detalhes", "Saiba mais",
-                         "Ver detalhes", "Inclusos"]:
-                buttons = page.get_by_text(text, exact=False)
-                count = await buttons.count()
-                for i in range(min(count, 10)):
-                    try:
-                        await buttons.nth(i).click(timeout=2000)
-                        await page.wait_for_timeout(500)
-                    except Exception:
-                        continue
-        except Exception as e:
-            logger.debug("SkyMaisFlow: expand falhou: %s", e)
+        """Clica em 'Detalhes do plano' de cada card e na aba 'Streamings'.
 
-        await page.wait_for_timeout(1000)
+        O SKY+ mostra os streamings em uma modal que abre ao clicar em
+        'Detalhes do plano'. Dentro da modal, há abas: Detalhes, Canais,
+        Streamings. Precisamos clicar na aba 'Streamings' para ver a lista.
+        """
+        import asyncio
+
+        details_links = page.get_by_text("Detalhes do plano", exact=False)
+        count = await details_links.count()
+        logger.info(
+            "SkyMaisFlow: encontrados %d links 'Detalhes do plano'",
+            count,
+        )
+
+        plan_streamings: list[str] = []
+
+        for i in range(count):
+            try:
+                # Clicar em "Detalhes do plano"
+                await details_links.nth(i).click(timeout=5000)
+                await page.wait_for_timeout(1500)
+
+                # Clicar na aba "Streamings"
+                streaming_tab = page.get_by_text(
+                    "Streamings", exact=True
+                )
+                if await streaming_tab.count() > 0:
+                    await streaming_tab.first.click(timeout=3000)
+                    await page.wait_for_timeout(1500)
+
+                    # Capturar texto da modal (contém os streamings)
+                    modal_text = await page.evaluate("""
+                        () => {
+                            // Buscar modal/dialog aberto
+                            const modals = document.querySelectorAll(
+                                '[class*="modal"], [class*="Modal"], '
+                                + '[role="dialog"], [class*="popup"], '
+                                + '[class*="Popup"], [class*="overlay"]'
+                            );
+                            for (const m of modals) {
+                                const text = m.innerText;
+                                if (text.includes('Streaming') && text.length > 50) {
+                                    return text;
+                                }
+                            }
+                            // Fallback: pegar tudo visível
+                            return document.body.innerText;
+                        }
+                    """)
+
+                    if modal_text:
+                        plan_streamings.append(modal_text)
+                        logger.info(
+                            "SkyMaisFlow: capturado texto da modal "
+                            "(%d chars) para plano %d",
+                            len(modal_text), i + 1,
+                        )
+
+                # Fechar modal (botão X ou Escape)
+                close_btn = page.locator(
+                    "[class*='close'], [aria-label='Close'], "
+                    "[class*='Close'], button:has-text('×')"
+                )
+                if await close_btn.count() > 0:
+                    await close_btn.first.click(timeout=2000)
+                else:
+                    await page.keyboard.press("Escape")
+                await page.wait_for_timeout(1000)
+
+            except Exception as e:
+                logger.debug(
+                    "SkyMaisFlow: erro no plano %d: %s", i, e
+                )
+                # Tentar fechar modal caso esteja aberta
+                try:
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(500)
+                except Exception:
+                    pass
+
+        # Salvar texto dos streamings como contexto
+        if plan_streamings:
+            self._plan_details_text = "\n\n".join(plan_streamings)
+        else:
+            self._plan_details_text = ""
 
     async def _extract_plan_details(self, page: Page) -> str:
         """Extrai texto detalhado de cada card de plano."""
