@@ -134,99 +134,73 @@ class NetflixFlow:
     async def _navigate_to_plans(self, page: Page) -> bool:
         """Tenta navegar para a tabela de planos da Netflix.
 
-        Estratégias:
-        1. Clicar em links/botões com texto CTA
-        2. Navegar diretamente para /signup/planform
-        3. Esperar se já está na página de planos
+        Fluxo confirmado:
+        1. Ir para /signup (mostra "Escolha seu plano" + botão "Próximo")
+        2. Clicar em "Próximo"
+        3. Tabela com 3 planos aparece (Padrão com anúncios, Padrão, Premium)
 
         Returns:
             True se conseguiu navegar e planos estão visíveis.
         """
         import asyncio
 
-        # Verificar se já tem R$ na página (planos visíveis)
+        # Verificar se já tem múltiplos R$ na página
         text = await page.evaluate("document.body.innerText")
-        # Contar ocorrências de R$ — se tem mais de 2, provavelmente
-        # já está mostrando planos
         r_count = text.count("R$")
         if r_count >= 3:
             logger.info(
-                "Netflix: %d preços já visíveis na página", r_count
+                "Netflix: %d preços já visíveis", r_count
             )
             return True
 
-        # Estratégia 1: Clicar em CTA
-        for cta_text in _CTA_TEXTS:
-            try:
-                locator = page.get_by_role(
-                    "link", name=cta_text
-                ).or_(page.get_by_role("button", name=cta_text))
-                if await locator.count() > 0:
-                    await locator.first.click(timeout=5000)
-                    logger.info(
-                        "Netflix: clicou em '%s'", cta_text
-                    )
-                    await page.wait_for_timeout(3000)
-
-                    # Verificar se navegou para signup/planform
-                    if "signup" in page.url or "planform" in page.url:
-                        # Esperar planos carregarem
-                        await self._wait_for_plans(page)
-                        return True
-            except Exception:
-                continue
-
-        # Estratégia 2: Navegar direto para planform
+        # Clicar em "Próximo" (botão principal da página /signup)
         try:
-            current_url = page.url
-            plan_url = "https://www.netflix.com/br/signup/planform"
-            await page.goto(plan_url, timeout=30000)
-            await page.wait_for_timeout(5000)
+            proximo_btn = page.get_by_role(
+                "button", name="Próximo"
+            ).or_(page.get_by_text("Próximo", exact=True))
 
-            text = await page.evaluate("document.body.innerText")
-            if "R$" in text and len(text) > 500:
-                logger.info(
-                    "Netflix: navegação direta para planform OK"
-                )
-                return True
-            else:
-                # Voltar para a URL original
-                await page.goto(current_url, timeout=30000)
+            if await proximo_btn.count() > 0:
+                await proximo_btn.first.click(timeout=5000)
+                logger.info("Netflix: clicou em 'Próximo'")
                 await page.wait_for_timeout(3000)
-        except Exception as e:
-            logger.debug(
-                "Netflix: falha na navegação direta: %s", e
-            )
 
-        # Estratégia 3: Scroll e esperar mais
-        for _ in range(3):
-            await page.evaluate(
-                "window.scrollTo(0, document.body.scrollHeight)"
+                # Esperar tabela de planos carregar
+                try:
+                    await page.wait_for_function(
+                        """() => {
+                            const text = document.body.innerText;
+                            return (text.match(/R\\$/g) || []).length >= 3
+                                && text.length > 500;
+                        }""",
+                        timeout=15000,
+                    )
+                    logger.info(
+                        "Netflix: tabela de planos carregada"
+                    )
+                    return True
+                except Exception:
+                    logger.warning(
+                        "Netflix: timeout esperando planos após "
+                        "'Próximo'"
+                    )
+        except Exception as e:
+            logger.debug("Netflix: erro ao clicar Próximo: %s", e)
+
+        # Fallback: tentar navegar direto para /signup/planform
+        try:
+            await page.goto(
+                "https://www.netflix.com/signup/planform",
+                timeout=30000,
             )
-            await asyncio.sleep(2)
+            await page.wait_for_timeout(5000)
             text = await page.evaluate("document.body.innerText")
             if text.count("R$") >= 3:
-                logger.info("Netflix: planos apareceram após scroll")
+                logger.info("Netflix: planform carregou")
                 return True
+        except Exception:
+            pass
 
         logger.warning(
-            "Netflix: não conseguiu navegar para tabela de planos"
+            "Netflix: não conseguiu ver tabela de planos"
         )
         return False
-
-    async def _wait_for_plans(self, page: Page) -> None:
-        """Aguarda a tabela de planos carregar."""
-        try:
-            await page.wait_for_function(
-                """() => {
-                    const text = document.body.innerText;
-                    return (text.match(/R\\$/g) || []).length >= 2
-                        && text.length > 500;
-                }""",
-                timeout=15000,
-            )
-            logger.info("Netflix: tabela de planos detectada")
-        except Exception:
-            logger.warning(
-                "Netflix: timeout aguardando tabela de planos"
-            )

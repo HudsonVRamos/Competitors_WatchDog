@@ -751,6 +751,26 @@ class PriceScraper:
                 )
                 skymais_text = await sky_flow.execute(page)
 
+            netflix_text: str = ""
+            if "netflix.com" in message.page_url:
+                from scraping_resilience.competitor_flows.netflix import (
+                    NetflixFlow,
+                )
+                netflix_flow = NetflixFlow(
+                    content_validator=self._content_validator,
+                    diagnostics_collector=diagnostics,
+                    health_check_scorer=self._health_check_scorer,
+                    screenshotter=screenshotter,
+                    competitor_id=message.competitor_id,
+                    cycle_id=message.cycle_id,
+                )
+                result = await netflix_flow.execute(page)
+                if result.get("extraction_skipped"):
+                    return MultiPriceExtractionResult(
+                        success=False,
+                        failure_reason=result.get("reason"),
+                    )
+
             # 8. Scroll incremental para forçar lazy-loading
             await self._scroll_page(page)
 
@@ -776,7 +796,7 @@ class PriceScraper:
             # Combinar texto extra de flows específicos
             extra_text = (
                 vivo_accumulated_text or globoplay_text
-                or skymais_text or ""
+                or skymais_text or netflix_text or ""
             )
 
             result = await extractor.extract_all(
