@@ -155,43 +155,65 @@ class SkyMaisFlow:
                         }
                     """)
 
-                    # Extrair nomes dos streamings via texto da modal
+                    # Extrair nomes dos streamings do conteúdo visível após clicar na aba
                     streaming_names = await page.evaluate("""
                         () => {
-                            // Lista de streamings conhecidos
                             const KNOWN_SERVICES = [
-                                'Amazon Prime', 'Disney+',
-                                'HBO Max', 'Paramount+',
-                                'Premiere', 'Sportynet+',
-                                'SportyNet+', 'Telecine',
+                                'Amazon Prime', 'Disney+', 'Disney',
+                                'HBO Max', 'HBO', 'Paramount+', 'Paramount',
+                                'Premiere', 'Sportynet+', 'Sportynet',
+                                'SportyNet+', 'SportyNet', 'Telecine',
                                 'Netflix', 'Globoplay',
-                                'Apple TV+', 'Star+',
+                                'Apple TV+', 'Apple TV', 'Star+',
                                 'ESPN', 'Discovery+'
                             ];
-                            // Buscar texto APENAS da modal
-                            const modals = document.querySelectorAll(
-                                '[class*="modal"], [class*="Modal"], '
-                                + '[role="dialog"], [class*="popup"], '
-                                + '[class*="Popup"], [class*="drawer"], '
-                                + '[class*="Drawer"], [class*="overlay"]'
-                            );
-                            let modalText = '';
-                            for (const m of modals) {
-                                const t = m.innerText;
-                                if (t.includes('Streaming') && t.length > 50) {
-                                    modalText = t;
-                                    break;
+                            const found = new Set();
+
+                            // Estratégia 1: alt text de imagens visíveis
+                            const images = document.querySelectorAll('img[alt]');
+                            for (const img of images) {
+                                const alt = img.alt;
+                                for (const s of KNOWN_SERVICES) {
+                                    if (alt.toLowerCase().includes(s.toLowerCase())) {
+                                        found.add(s);
+                                    }
                                 }
                             }
-                            if (!modalText) return [];
-                            // Buscar quais serviços conhecidos estão no texto da modal
-                            const found = [];
-                            for (const s of KNOWN_SERVICES) {
-                                if (modalText.includes(s)) {
-                                    found.push(s);
+
+                            // Estratégia 2: texto após "Streamings"
+                            const allText = document.body.innerText;
+                            const idx = allText.lastIndexOf('Streamings');
+                            if (idx >= 0) {
+                                const section = allText.substring(idx, idx + 500);
+                                for (const s of KNOWN_SERVICES) {
+                                    if (section.includes(s)) {
+                                        found.add(s);
+                                    }
                                 }
                             }
-                            return found;
+
+                            // Estratégia 3: aria-label de botões/links
+                            const elems = document.querySelectorAll('[aria-label]');
+                            for (const el of elems) {
+                                const label = el.getAttribute('aria-label');
+                                for (const s of KNOWN_SERVICES) {
+                                    if (label && label.includes(s)) {
+                                        found.add(s);
+                                    }
+                                }
+                            }
+
+                            // Normalizar nomes
+                            const normalized = new Set();
+                            for (const f of found) {
+                                if (f === 'Disney' || f === 'Disney+') normalized.add('Disney+');
+                                else if (f === 'HBO' || f === 'HBO Max') normalized.add('HBO Max');
+                                else if (f === 'Paramount' || f === 'Paramount+') normalized.add('Paramount+');
+                                else if (f === 'Sportynet' || f === 'Sportynet+' || f === 'SportyNet' || f === 'SportyNet+') normalized.add('Sportynet+');
+                                else if (f === 'Apple TV' || f === 'Apple TV+') normalized.add('Apple TV+');
+                                else normalized.add(f);
+                            }
+                            return [...normalized];
                         }
                     """)
 
