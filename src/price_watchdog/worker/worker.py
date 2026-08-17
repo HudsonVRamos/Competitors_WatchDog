@@ -1030,6 +1030,7 @@ class Worker:
             Record existente ou None.
         """
         from sqlalchemy import select as sa_select
+        from sqlalchemy.orm import selectinload
 
         from price_watchdog.database import get_session
 
@@ -1037,6 +1038,11 @@ class Worker:
             async with get_session() as session:
                 stmt = (
                     sa_select(CompetitorIntelligenceRecord)
+                    .options(
+                        selectinload(
+                            CompetitorIntelligenceRecord.packages
+                        )
+                    )
                     .where(
                         CompetitorIntelligenceRecord.cycle_id == cycle_id,
                         CompetitorIntelligenceRecord.competitor_id
@@ -1044,7 +1050,11 @@ class Worker:
                     )
                 )
                 result = await session.execute(stmt)
-                return result.scalar_one_or_none()
+                record = result.scalar_one_or_none()
+                if record:
+                    # Expunge para usar fora da session
+                    session.expunge(record)
+                return record
         except Exception:
             return None
 
