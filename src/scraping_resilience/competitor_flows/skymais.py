@@ -155,41 +155,43 @@ class SkyMaisFlow:
                         }
                     """)
 
-                    # Extrair nomes dos streamings
+                    # Extrair nomes dos streamings via texto da modal
                     streaming_names = await page.evaluate("""
                         () => {
-                            // Buscar textos dos streamings na aba ativa
-                            const names = [];
-                            const items = document.querySelectorAll(
-                                '[class*="streaming"] span, '
-                                + '[class*="streaming"] p, '
-                                + '[class*="Streaming"] span, '
-                                + '[class*="service"] span'
+                            // Lista de streamings conhecidos
+                            const KNOWN_SERVICES = [
+                                'Amazon Prime', 'Disney+',
+                                'HBO Max', 'Paramount+',
+                                'Premiere', 'Sportynet+',
+                                'SportyNet+', 'Telecine',
+                                'Netflix', 'Globoplay',
+                                'Apple TV+', 'Star+',
+                                'ESPN', 'Discovery+'
+                            ];
+                            // Buscar texto APENAS da modal
+                            const modals = document.querySelectorAll(
+                                '[class*="modal"], [class*="Modal"], '
+                                + '[role="dialog"], [class*="popup"], '
+                                + '[class*="Popup"], [class*="drawer"], '
+                                + '[class*="Drawer"], [class*="overlay"]'
                             );
-                            for (const item of items) {
-                                const t = item.innerText.trim();
-                                if (t && t.length > 2 && t.length < 30
-                                    && !t.includes('Streaming')
-                                    && !t.includes('Destacado')) {
-                                    names.push(t);
+                            let modalText = '';
+                            for (const m of modals) {
+                                const t = m.innerText;
+                                if (t.includes('Streaming') && t.length > 50) {
+                                    modalText = t;
+                                    break;
                                 }
                             }
-                            if (names.length === 0) {
-                                // Fallback: pegar texto da seção ativa
-                                const body = document.body.innerText;
-                                const services = [
-                                    'Amazon Prime', 'Disney+',
-                                    'HBO Max', 'Paramount+',
-                                    'Premiere', 'Sportynet+',
-                                    'SportyNet+', 'Telecine',
-                                    'Netflix', 'Globoplay',
-                                    'Apple TV+', 'Star+'
-                                ];
-                                for (const s of services) {
-                                    if (body.includes(s)) names.push(s);
+                            if (!modalText) return [];
+                            // Buscar quais serviços conhecidos estão no texto da modal
+                            const found = [];
+                            for (const s of KNOWN_SERVICES) {
+                                if (modalText.includes(s)) {
+                                    found.push(s);
                                 }
                             }
-                            return names;
+                            return found;
                         }
                     """)
 
